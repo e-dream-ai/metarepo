@@ -85,7 +85,7 @@ authenticateWorkOS(authToken):
 
   # Session expired, need refresh
   lockKey = "wos-refresh-lock:" + sha256(authToken)
-  resultKey = "wos-refresh-result:" + sha256(authToken)
+  resultListKey = "wos-refresh-result:" + sha256(authToken)
 
   # Try to acquire lock
   acquired = redis.SET(lockKey, "1", NX, EX 10)
@@ -94,35 +94,43 @@ authenticateWorkOS(authToken):
     try:
       refreshResult = refreshWorkOSSession(authToken)
       if refreshResult.authenticated && refreshResult.sealedSession:
-        # Cache result for concurrent waiters
-        redis.SET(resultKey, refreshResult.sealedSession, EX 30)
+        # Push result to list — wakes all BLPOP waiters
+        redis.RPUSH(resultListKey, refreshResult.sealedSession)
+        redis.EXPIRE(resultListKey, 30)
         session = authenticateAndGetWorkOSSession(refreshResult.sealedSession)
         return session ? { session, sealedSession: refreshResult.sealedSession } : null
       else:
-        # Refresh failed — cache a failure sentinel so waiters don't also try
-        redis.SET(resultKey, "__FAILED__", EX 5)
+        # Refresh failed — push failure sentinel so waiters don't hang
+        redis.RPUSH(resultListKey, "__FAILED__")
+        redis.EXPIRE(resultListKey, 5)
         return null
     finally:
       redis.DEL(lockKey)
 
   else:
-    # Another request is refreshing — wait for result
-    sealedSession = pollRedis(resultKey, timeout=5s, interval=100ms)
-    if sealedSession && sealedSession != "__FAILED__":
-      session = authenticateAndGetWorkOSSession(sealedSession)
-      return session ? { session, sealedSession } : null
-    else:
-      return null
+    # Another request is refreshing — block until result is available
+    result = redis.BLPOP(resultListKey, 5)  # 5s timeout
+    if result:
+      sealedSession = result[1]
+      # Re-push so other waiters also get the result
+      redis.RPUSH(resultListKey, sealedSession)
+      redis.EXPIRE(resultListKey, 30)
+      if sealedSession != "__FAILED__":
+        session = authenticateAndGetWorkOSSession(sealedSession)
+        return session ? { session, sealedSession } : null
+    return null
 ```
 
 **Key details:**
 
 - **Lock key**: `wos-refresh-lock:<sha256>` with 10s TTL (deadlock protection)
-- **Result key**: `wos-refresh-result:<sha256>` with 30s TTL (enough for concurrent requests to pick up)
-- **Failure sentinel**: `__FAILED__` with 5s TTL prevents waiters from retrying a failed refresh
+- **Result list key**: `wos-refresh-result:<sha256>` — uses `BLPOP` for zero-overhead blocking instead of polling. Each waiter pops, reads, and re-pushes the value for subsequent waiters.
+- **Failure sentinel**: `__FAILED__` with 5s TTL. After expiry, a new request can re-attempt refresh — this is intentional to allow retry after transient failures.
+- **Result TTL**: 30s (enough for concurrent requests to pick up)
 - **Hash the sealed session**: The sealed session is large and sensitive; only the hash is used as a Redis key
-- Uses existing Redis connection (already available for BullMQ)
-- The `withTimeout` wrapper in `workOSAuth` already handles the case where polling takes too long (10s auth timeout)
+- **Lock is per sealed session, not per user**: Different clients (web, C++) may hold different sealed sessions if one refreshed more recently. Each sealed session gets its own lock because each contains a different refresh token. This is correct — they must refresh independently.
+- **Redis client**: Import `redisClient` from `clients/redis.client.ts` (existing ioredis instance, also used by BullMQ)
+- The `withTimeout` wrapper in `workOSAuth` (10s) caps total auth time including the BLPOP wait
 
 **Files changed:**
 - `backend/src/utils/workos.util.ts` — modify `authenticateWorkOS()`, add Redis lock/poll helpers
@@ -134,6 +142,8 @@ authenticateWorkOS(authToken):
 Replace `authenticateAndGetWorkOSSession()` with `authenticateWorkOS()` in `socketWorkOSAuth`. This reuses the same function (with Redis dedup from #1) that the HTTP middleware uses.
 
 ```typescript
+const SOCKET_AUTH_TIMEOUT_MS = 10_000; // Match HTTP middleware timeout
+
 export const socketWorkOSAuth = async (
   socket: Socket,
   next: (err?: ExtendedError | undefined) => void,
@@ -143,7 +153,11 @@ export const socketWorkOSAuth = async (
     socket.cookies["wos-session"];
 
   try {
-    const result = await authenticateWorkOS(authToken);
+    // Use withTimeout to prevent hung BLPOP from blocking the socket handshake
+    const result = await withTimeout(
+      authenticateWorkOS(authToken),
+      SOCKET_AUTH_TIMEOUT_MS,
+    );
 
     if (!result) {
       return next(authError);
@@ -168,7 +182,11 @@ export const socketWorkOSAuth = async (
 };
 ```
 
-**Also:** Remove `socketAuthMiddleware` (deprecated Cognito) from the middleware chain in `middleware.ts`. No client uses Cognito tokens for socket auth — the C++ client on master sends `wos-session` via cookie header. Removing dead code eliminates a potential error path (Cognito JWT validation throwing and rejecting the socket).
+**Also:** Remove `socketAuthMiddleware` (deprecated Cognito) from the middleware chain in `middleware.ts`. No client uses Cognito tokens for socket auth — the C++ client on master sends `wos-session` via cookie header.
+
+**Safety of removal:** The deprecated middleware checks `socket.handshake.query.token` for a Cognito JWT. If an old client sends a Cognito token, the middleware either validates it (sets user, calls `next()` — then `socketWorkOSAuth` overwrites it and may reject) or throws (returns `authError`). In both cases the old middleware provides no benefit — WorkOS auth handles real validation. Removing it eliminates a potential error path where Cognito JWT validation throws and rejects a client that would otherwise pass WorkOS auth.
+
+**Note:** The `withTimeout` helper from `require-auth.middleware.ts` should be extracted to a shared utility (e.g., `utils/async.util.ts`) so both the HTTP and socket middlewares can use it without duplication.
 
 **Files changed:**
 - `backend/src/middlewares/socket.middleware.ts` — update `socketWorkOSAuth`, remove `socketAuthMiddleware`
@@ -192,12 +210,30 @@ The `logout` handler (`auth.controller.ts:991-1024`) already:
 3. Attempts to call the WorkOS logout URL (best-effort)
 4. Returns 200 on success; catch block calls `handleWorkosError` on failure
 
-Note: if the sealed session is expired, `loadSealedSession` / `getLogoutUrl` may throw. The cookie is already cleared before this point, so the client-side logout succeeds regardless. However, the response would be an error. To make this robust, the handler should catch errors from WorkOS logout URL calls and still return 200 — the cookie is already cleared, and the WorkOS session will expire naturally. This is a small improvement to make alongside removing `requireAuth`.
+**Problem with current catch block:** If the sealed session is expired, `loadSealedSession` / `getLogoutUrl` will throw. The cookie is already cleared (line 994), so the client is effectively logged out. But `handleWorkosError` returns a 400/503 error response, and the frontend's `fetchLogout` shows an error toast.
+
+**Handler change:** Modify the catch block to return 200 for session-related errors (the cookie is already cleared, and the WorkOS session will expire naturally). Only propagate genuine server errors:
+
+```typescript
+} catch (error) {
+  // Cookie is already cleared above. If WorkOS logout URL fails
+  // (e.g., expired session), the client is still logged out.
+  // Only log the error; return success to avoid confusing error toasts.
+  APP_LOGGER.error("Logout WorkOS error (cookie already cleared)", error);
+  return res.status(httpStatus.OK).json(
+    jsonResponse({
+      success: true,
+      message: AUTH_MESSAGES.USER_LOGGED_OUT,
+    }),
+  );
+}
+```
 
 This matches V1's approach (`authRouter.post("/logout", authController.handleLogout)` — no `requireAuth`). The endpoint is idempotent and safe without auth — it only invalidates the caller's own session cookie.
 
 **Files changed:**
 - `backend/src/routes/v2/auth.routes.ts` — remove `requireAuth` from logout route
+- `backend/src/controllers/auth.controller.ts` — modify `logout` handler catch block to return 200
 
 ## Client-side follow-ups (not in scope)
 
