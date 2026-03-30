@@ -16,7 +16,7 @@ Frontend (React) ──→ Backend (Node/Express) ──→ Worker (BullMQ)
                       (Flask/FFmpeg)            (ComfyUI/PyTorch)
                            │
                            ↓
-                    Storage (S3 + R2)
+                    Storage (R2)
 ```
 
 **Data flow:** User creates dream via frontend → backend queues job → worker submits to RunPod → gpu-container runs ComfyUI workflow → result stored in R2 → video service processes (thumbnails/filmstrips) → frontend displays
@@ -25,7 +25,7 @@ Frontend (React) ──→ Backend (Node/Express) ──→ Worker (BullMQ)
 
 | Repo | Stack | Purpose |
 |------|-------|---------|
-| `backend` | TypeScript/Express/TypeORM/BullMQ | Main API, auth (Cognito), Socket.IO, job orchestration |
+| `backend` | TypeScript/Express/TypeORM/BullMQ | Main API, auth (WorkOS), Socket.IO, job orchestration |
 | `frontend` | React/Vite/TypeScript/Zustand | Web UI for dream creation, playback, playlists |
 | `video` | Python/Flask/RQ/FFmpeg | Video processing: thumbnails, filmstrips, transcoding |
 | `worker` | TypeScript/Express/BullMQ | GPU job coordinator, RunPod submission, Bull Dashboard |
@@ -33,6 +33,7 @@ Frontend (React) ──→ Backend (Node/Express) ──→ Worker (BullMQ)
 | `python-api` | Python | edream_sdk - Python client for backend API |
 | `engines` | Python | Batch processing scripts (wan-i2v, uprez, qwen) |
 | `electric-sheep-engine` | Python | Legacy Electric Sheep playlist sync |
+| `landing-page` | Next.js/React/Tailwind/Biome | Static website (infinidream.ai) |
 | `client` | C++ | Native macOS desktop app/screensaver |
 
 ## Commands by Repository
@@ -86,20 +87,28 @@ python3 scripts/run_uprez_batch.py       # Video upscaling batch
 python3 scripts/run_qwen_image_batch.py  # Image generation batch
 ```
 
+### landing-page
+```bash
+pnpm run dev              # Next.js dev server with Turbopack
+pnpm run build            # Static export to out/
+pnpm run biome:check      # Lint + format (Biome)
+```
+
 ### client (macOS)
 ```bash
 brew install git-lfs && git lfs install
 open client_generic/MacBuild/e-dream.xcodeproj
-./client_generic/MacBuild/build_installer.sh 0.1.0 e-dream-0.1.0.dmg
+./client_generic/MacBuild/build.py
+./client_generic/MacBuild/release.py
 ```
 
 ## Key Integrations
 
-- **Auth:** AWS Cognito (JWT tokens via Passport.js)
+- **Auth:** WorkOS
 - **Database:** PostgreSQL with TypeORM migrations
 - **Job Queue:** Redis + BullMQ (Node) / RQ (Python)
 - **GPU:** RunPod serverless with model-specific endpoints (Deforum, AnimateDiff, Wan, Uprez, Qwen)
-- **Storage:** AWS S3 (private) + Cloudflare R2 (public CDN)
+- **Storage:** Cloudflare R2 (public CDN)
 - **Real-time:** Socket.IO with Redis adapter
 - **Monitoring:** Bugsnag error tracking
 
@@ -134,9 +143,10 @@ Worker submits to different RunPod endpoints based on job type:
 | Service | Platform | Trigger |
 |---------|----------|---------|
 | backend | Heroku | Push to `stage`/`main` |
-| frontend | Netlify | Push to `stage`/`main` |
+| frontend | Cloudflare | Push to `stage`/`main` |
 | video | Heroku | Push to `stage`/`main` |
 | worker | Heroku | Manual |
+| landing-page | Cloudflare | Static export |
 | gpu-container | RunPod | Docker Hub via GitHub Actions |
 
 ## Shared SDK (edream_sdk)
