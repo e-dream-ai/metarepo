@@ -1,0 +1,24 @@
+# Sub-repos (each has its own git history)
+backend/
+frontend/
+worker/
+video/
+gpu-container/
+python-api/
+engines/
+electric-sheep-engine/
+client/
+
+# IDE
+.idea/
+.vscode/
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+!.env.example
