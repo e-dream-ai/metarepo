@@ -9,7 +9,7 @@
 
 | # | Issue | Location | New in this branch? |
 |---|-------|----------|---------------------|
-| 1 | **TLS certificate validation completely disabled** — `CURLOPT_SSL_VERIFYHOST` and `CURLOPT_SSL_VERIFYPEER` both set to 0. All HTTPS traffic is vulnerable to MITM. | `Networking.cpp:311-313` | No (pre-existing) |
+| 1 | **TLS certificate validation completely disabled** — `CURLOPT_SSL_VERIFYHOST` and `CURLOPT_SSL_VERIFYPEER` both set to 0. All HTTPS traffic is vulnerable to MITM. Tracked in [e-dream-ai/client#546](https://github.com/e-dream-ai/client/issues/546). | `Networking.cpp:311-313` | No (pre-existing) |
 | 2 | **OpenSSL 1.0.2k (Jan 2017)** — EOL since Dec 2019, years of unpatched CVEs. Only affects Windows build. | `openssl-1.0.2k/` | No (pre-existing) |
 
 ## HIGH
