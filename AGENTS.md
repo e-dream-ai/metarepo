@@ -13,7 +13,7 @@ Frontend (React) ──→ Backend (Node/Express) ──→ Worker (BullMQ)
                            │                         │
                            ↓                         ↓
                     Video Service ←──────── GPU Container (RunPod)
-                      (Flask/FFmpeg)            (ComfyUI/PyTorch)
+                    (RunPod/FFmpeg)           (ComfyUI/PyTorch)
                            │
                            ↓
                     Storage (R2)
@@ -27,7 +27,7 @@ Frontend (React) ──→ Backend (Node/Express) ──→ Worker (BullMQ)
 |------|-------|---------|
 | `backend` | TypeScript/Express/TypeORM/BullMQ | Main API, auth (WorkOS), Socket.IO, job orchestration |
 | `frontend` | React/Vite/TypeScript/Zustand | Web UI for dream creation, playback, playlists |
-| `video` | Python/Flask/RQ/FFmpeg | Video processing: thumbnails, filmstrips, transcoding |
+| `video` | Python/FFmpeg (RunPod container) | Video processing: thumbnails, filmstrips, transcoding |
 | `worker` | TypeScript/Express/BullMQ | GPU job coordinator, RunPod submission, Bull Dashboard |
 | `gpu-container` | Python/Docker/ComfyUI | Serverless GPU container on RunPod |
 | `python-api` | Python | edream_sdk - Python client for backend API |
@@ -55,13 +55,6 @@ pnpm run dev              # Vite dev server (localhost:5173)
 pnpm run build            # Production build
 pnpm run lint             # ESLint check
 pnpm run type-check       # TypeScript validation
-```
-
-### video
-```bash
-pip install -r requirements.txt
-flask run                 # Start Flask (port 5000)
-python worker.py          # Start RQ worker (separate terminal)
 ```
 
 ### worker
@@ -144,7 +137,7 @@ Worker submits to different RunPod endpoints based on job type:
 |---------|----------|---------|
 | backend | Heroku | Push to `stage`/`main` |
 | frontend | Cloudflare | Push to `stage`/`main` |
-| video | Heroku | Push to `stage`/`main` |
+| video | RunPod | Docker Hub via GitHub Actions |
 | worker | Heroku | Manual |
 | landing-page | Cloudflare | Static export |
 | gpu-container | RunPod | Docker Hub via GitHub Actions |
