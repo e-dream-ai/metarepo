@@ -19,7 +19,7 @@ Frontend (React) ──→ Backend (Node/Express) ──→ Worker (BullMQ)
                     Storage (R2)
 ```
 
-**Data flow:** User creates dream via frontend → backend queues job → worker submits to RunPod → gpu-container runs ComfyUI workflow → result stored in R2 → video service processes (thumbnails/filmstrips) → frontend displays
+**Data flow:** User creates dream via frontend → backend queues job → worker submits to RunPod → gpu-container-comfy runs ComfyUI workflow → result stored in R2 → video service processes (thumbnails/filmstrips) → frontend displays
 
 ## Repositories
 
@@ -29,7 +29,7 @@ Frontend (React) ──→ Backend (Node/Express) ──→ Worker (BullMQ)
 | `frontend` | React/Vite/TypeScript/Zustand | Web UI for dream creation, playback, playlists |
 | `video` | Python/FFmpeg (RunPod container) | Video processing: thumbnails, filmstrips, transcoding |
 | `worker` | TypeScript/Express/BullMQ | GPU job coordinator, RunPod submission, Bull Dashboard |
-| `gpu-container` | Python/Docker/ComfyUI | Serverless GPU container on RunPod |
+| `gpu-container-comfy` | Python/Docker/ComfyUI | Serverless GPU container on RunPod |
 | `python-api` | Python | edream_sdk - Python client for backend API |
 | `engines` | Python | Batch processing scripts (wan-i2v, uprez, qwen) |
 | `electric-sheep-engine` | Python | Legacy Electric Sheep playlist sync |
@@ -65,7 +65,7 @@ node dist/prompt.js prompt/deforum-fish.json  # Submit job via CLI
 ```
 Bull Dashboard: http://localhost:3000/admin (user: admin)
 
-### gpu-container
+### gpu-container-comfy
 ```bash
 docker build -t comfy:dev-base --target base --platform linux/amd64 .
 docker-compose up         # Local dev (ComfyUI: 8188, API: 8000)
@@ -140,7 +140,7 @@ Worker submits to different RunPod endpoints based on job type:
 | video | RunPod | Docker Hub via GitHub Actions |
 | worker | Heroku | Manual |
 | landing-page | Cloudflare | Static export |
-| gpu-container | RunPod | Docker Hub via GitHub Actions |
+| gpu-container-comfy | RunPod | Docker Hub via GitHub Actions |
 
 ## Shared SDK (edream_sdk)
 

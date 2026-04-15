@@ -3,7 +3,7 @@ backend/
 frontend/
 worker/
 video/
-gpu-container/
+gpu-container-comfy/
 python-api/
 engines/
 electric-sheep-engine/

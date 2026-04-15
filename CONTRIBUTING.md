@@ -28,7 +28,7 @@ contributors and users.
 
 - **TypeScript/Node repos** (backend, frontend, worker): Follow existing ESLint
   config. Run `pnpm run lint:fix` before submitting.
-- **Python repos** (video, gpu-container, engines, python-api): Follow PEP 8.
+- **Python repos** (video, gpu-container-comfy, engines, python-api): Follow PEP 8.
 - **Next.js** (landing-page): Use Biome for linting and formatting
   (`pnpm run biome:check`).
 
