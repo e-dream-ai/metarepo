@@ -95,6 +95,39 @@ open client_generic/MacBuild/e-dream.xcodeproj
 ./client_generic/MacBuild/release.py
 ```
 
+## Local Development (backend + frontend)
+
+The `.env` files in `backend/` and `frontend/` are pre-configured to point at **staging** services (AWS RDS Postgres at `edream-postgres-db-staging...`, Upstash Redis). No local Postgres/Redis is needed — both dev servers connect directly to staging. Make sure both repos are on the `stage` branch so code matches the data.
+
+### Start both servers
+
+```bash
+cd backend  && pnpm run dev   # tsx watch, serves on :8080
+cd frontend && pnpm run dev   # vite, serves on :5173
+```
+
+Frontend `.env` sets `VITE_BACKEND_URL=http://localhost:8080/api`, so the local frontend talks to the local backend.
+
+### Healthy startup signals (grep these in logs)
+
+- **backend** — `Worker NNNN: Connected with postgres` then `e-dream.ai api 0.0.1 started on port 8080`. Note: no "listening"/"ready" string — match on `started on port`.
+- **frontend** — `VITE vX.Y.Z  ready in NNN ms` and `Local:   http://localhost:5173/`.
+- **Sanity check:** `curl -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/v1` → `200`, same for `http://localhost:5173`.
+
+### Repo layout gotcha
+
+Inside `metarepo/`, each repo is a symlink to a sibling directory (e.g. `metarepo/backend → ../backend`). `node_modules` and any `pnpm install` run against the real path (`/Users/spot/e-dream-ai/backend/`), not the metarepo path. Error stack traces will show the real path — that's expected, not a misconfiguration.
+
+### Common failure: `Cannot find module 'bullmq'` (or similar) on backend start
+
+Means backend deps are stale / out of sync with the lockfile. Fix:
+
+```bash
+cd backend && pnpm install        # if prompted to wipe node_modules, accept
+```
+
+(pnpm sometimes asks to reinstall node_modules from scratch when the store/lockfile version drifted; safe to accept since contents come from the registry.)
+
 ## Key Integrations
 
 - **Auth:** WorkOS
