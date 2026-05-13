@@ -1,0 +1,1458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Studio Roadmap — Jay Meeting 2026-05-13</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0c0c0e;
+  --bg-card: #161619;
+  --bg-elevated: #1e1e22;
+  --bg-input: #26262b;
+  --border: #2a2a30;
+  --border-hover: #3a3a42;
+  --text: #e8e6e3;
+  --text-dim: #8a8890;
+  --text-muted: #5a5860;
+  --accent: #d4a853;
+  --accent-dim: rgba(212, 168, 83, 0.15);
+  --accent-glow: rgba(212, 168, 83, 0.08);
+  --success: #4ade80;
+  --processing: #60a5fa;
+  --queued: #6b7280;
+  --radius: 12px;
+  --radius-sm: 8px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html {
+  scroll-behavior: smooth;
+  scroll-snap-type: y mandatory;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-weight: 400;
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+/* ── Slide System ── */
+.slide {
+  min-height: 100vh;
+  scroll-snap-align: start;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 60px 80px;
+  position: relative;
+  overflow: hidden;
+}
+
+.slide::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: radial-gradient(ellipse 60% 50% at 50% 0%, var(--accent-glow), transparent);
+  pointer-events: none;
+}
+
+.slide-number {
+  position: absolute;
+  top: 40px;
+  right: 60px;
+  font-family: 'Instrument Serif', serif;
+  font-size: 14px;
+  color: var(--text-muted);
+  letter-spacing: 0.1em;
+}
+
+/* ── Typography ── */
+h1 {
+  font-family: 'Instrument Serif', serif;
+  font-size: 72px;
+  font-weight: 400;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  margin-bottom: 24px;
+}
+
+h1 .accent { color: var(--accent); }
+
+h2 {
+  font-family: 'Instrument Serif', serif;
+  font-size: 48px;
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  margin-bottom: 16px;
+}
+
+h3 {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+
+.subtitle {
+  font-size: 20px;
+  color: var(--text-dim);
+  max-width: 640px;
+  font-weight: 300;
+  line-height: 1.5;
+}
+
+.slide-intro {
+  font-size: 17px;
+  color: var(--text-dim);
+  max-width: 560px;
+  margin-bottom: 48px;
+  font-weight: 300;
+}
+
+/* ── Title slide ── */
+.title-slide {
+  align-items: center;
+  text-align: center;
+}
+
+.title-slide h1 {
+  font-size: 80px;
+}
+
+.title-slide .subtitle {
+  margin: 0 auto;
+}
+
+.logo-mark {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), #b8872e);
+  margin: 0 auto 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Instrument Serif', serif;
+  font-size: 22px;
+  color: var(--bg);
+}
+
+.meta {
+  margin-top: 40px;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+/* ── Phase cards ── */
+.phase-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  margin-top: 40px;
+}
+
+.phase-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px;
+  transition: border-color 0.3s, transform 0.3s;
+}
+
+.phase-card:hover {
+  border-color: var(--border-hover);
+  transform: translateY(-2px);
+}
+
+.phase-card.done {
+  opacity: 0.5;
+}
+
+.phase-card.active {
+  border-color: var(--accent);
+  background: linear-gradient(135deg, var(--bg-card), var(--accent-dim));
+}
+
+.phase-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.phase-card.active .phase-label { color: var(--accent); }
+
+.phase-title {
+  font-family: 'Instrument Serif', serif;
+  font-size: 24px;
+  margin-bottom: 10px;
+}
+
+.phase-desc {
+  font-size: 14px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.phase-status {
+  display: inline-block;
+  margin-top: 14px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+}
+
+.phase-card.done .phase-status {
+  background: rgba(74, 222, 128, 0.1);
+  color: var(--success);
+}
+
+.phase-card.active .phase-status {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+/* ── Mockup: Flow Builder ── */
+.mockup-container {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  margin-top: 32px;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.4);
+}
+
+.mockup-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 20px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+
+.mockup-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.mockup-dot:nth-child(1) { background: #ff5f57; }
+.mockup-dot:nth-child(2) { background: #febc2e; }
+.mockup-dot:nth-child(3) { background: #28c840; }
+
+.mockup-url {
+  flex: 1;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.mockup-body {
+  padding: 0;
+}
+
+/* Studio chrome */
+.studio-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 28px;
+  border-bottom: 1px solid var(--border);
+}
+
+.studio-title {
+  font-family: 'Instrument Serif', serif;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+
+.mode-toggle {
+  display: flex;
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 3px;
+  gap: 2px;
+}
+
+.mode-btn {
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: 'DM Sans', sans-serif;
+}
+
+.mode-btn.active {
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+/* Keyframe strip */
+.keyframe-section {
+  padding: 28px;
+}
+
+.section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  margin-bottom: 20px;
+}
+
+.keyframe-strip {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+
+.keyframe-card {
+  flex-shrink: 0;
+  width: 140px;
+  height: 100px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 2px solid var(--border);
+  position: relative;
+  cursor: grab;
+  transition: border-color 0.2s;
+}
+
+.keyframe-card:hover { border-color: var(--border-hover); }
+
+.keyframe-card img,
+.keyframe-card .kf-placeholder {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.kf-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: linear-gradient(135deg, #1a1520, #1d1825);
+}
+
+.kf-number {
+  position: absolute;
+  bottom: 6px;
+  left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  color: white;
+  background: rgba(0,0,0,0.6);
+  padding: 2px 6px;
+  border-radius: 4px;
+  backdrop-filter: blur(4px);
+}
+
+/* Transition connector */
+.transition-connector {
+  flex-shrink: 0;
+  width: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  position: relative;
+  cursor: pointer;
+}
+
+.transition-connector:hover .t-line { border-color: var(--accent); }
+.transition-connector:hover .t-duration { color: var(--accent); }
+
+.t-line {
+  width: 32px;
+  border-top: 2px dashed var(--border);
+  transition: border-color 0.2s;
+}
+
+.t-duration {
+  font-size: 10px;
+  color: var(--text-muted);
+  transition: color 0.2s;
+}
+
+.t-click-hint {
+  position: absolute;
+  bottom: -18px;
+  font-size: 9px;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.2s;
+  white-space: nowrap;
+}
+
+.transition-connector:hover .t-click-hint { opacity: 1; }
+
+/* Add buttons */
+.add-buttons {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.add-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: 'DM Sans', sans-serif;
+}
+
+.add-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--text);
+}
+
+.add-btn .plus {
+  font-size: 15px;
+  color: var(--accent);
+}
+
+/* Transition settings */
+.settings-section {
+  padding: 0 28px 28px;
+  animation: fadeSlideUp 0.4s ease;
+}
+
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.settings-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field.wide { flex: 1; }
+
+.field-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.field-input {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px 12px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: 'DM Sans', sans-serif;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.field-input:focus { border-color: var(--accent); }
+
+.field-select {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px 12px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: 'DM Sans', sans-serif;
+  appearance: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%238a8890'%3E%3Cpath d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+}
+
+.generate-btn {
+  padding: 9px 20px;
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: 'DM Sans', sans-serif;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.generate-btn:hover {
+  background: #e0b45e;
+  transform: translateY(-1px);
+}
+
+/* Results section */
+.results-section {
+  padding: 0 28px 28px;
+  animation: fadeSlideUp 0.5s ease;
+}
+
+.results-strip {
+  display: flex;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.result-card {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.result-thumb {
+  height: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.result-thumb.done {
+  background: linear-gradient(135deg, #1a1d20, #1c2025);
+}
+
+.result-thumb.processing {
+  background: linear-gradient(135deg, #161b22, #1a2030);
+}
+
+.result-thumb.queued {
+  background: var(--bg-elevated);
+}
+
+.result-status {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.result-status.done { color: var(--success); }
+.result-status.processing { color: var(--processing); }
+.result-status.queued { color: var(--queued); }
+
+.result-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 3px;
+  background: var(--processing);
+  border-radius: 0 2px 0 0;
+  transition: width 0.3s;
+}
+
+.result-label {
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Action bar */
+.action-bar {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.action-btn {
+  padding: 8px 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  font-family: 'DM Sans', sans-serif;
+  transition: all 0.2s;
+}
+
+.action-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--text);
+}
+
+.action-btn.primary {
+  background: var(--accent-dim);
+  border-color: rgba(212, 168, 83, 0.3);
+  color: var(--accent);
+}
+
+/* ── Inline transition editor mockup ── */
+.inline-editor-demo {
+  margin-top: 40px;
+}
+
+.ie-strip {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+}
+
+.ie-card {
+  flex-shrink: 0;
+  width: 120px;
+  height: 86px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 2px solid var(--border);
+  background: linear-gradient(135deg, #1a1520, #1d1825);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ie-editor {
+  flex-shrink: 0;
+  width: 220px;
+  margin: 0 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  box-shadow: 0 8px 32px rgba(212, 168, 83, 0.08);
+}
+
+.ie-editor .field { margin-bottom: 10px; }
+
+.ie-editor .field:last-of-type { margin-bottom: 12px; }
+
+.ie-editor .field-input,
+.ie-editor .field-select {
+  width: 100%;
+  font-size: 12px;
+  padding: 7px 10px;
+}
+
+.ie-btn-row {
+  display: flex;
+  gap: 8px;
+}
+
+.ie-gen-btn {
+  flex: 1;
+  padding: 7px 0;
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: 'DM Sans', sans-serif;
+}
+
+.ie-close-btn {
+  width: 28px;
+  padding: 7px 0;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: center;
+}
+
+/* ── Feature list ── */
+.feature-list {
+  list-style: none;
+  margin-top: 32px;
+}
+
+.feature-list li {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  font-size: 16px;
+  color: var(--text-dim);
+}
+
+.feature-list li:last-child { border-bottom: none; }
+
+.feature-bullet {
+  color: var(--accent);
+  font-size: 8px;
+  flex-shrink: 0;
+  margin-top: 6px;
+}
+
+.feature-list strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* ── Two column ── */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 48px;
+  margin-top: 40px;
+}
+
+.col-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px;
+}
+
+.col-card h4 {
+  font-family: 'Instrument Serif', serif;
+  font-size: 22px;
+  margin-bottom: 16px;
+}
+
+.col-card ul {
+  list-style: none;
+}
+
+.col-card li {
+  padding: 8px 0;
+  font-size: 14px;
+  color: var(--text-dim);
+  border-bottom: 1px solid rgba(42,42,48,0.5);
+}
+
+.col-card li:last-child { border-bottom: none; }
+
+.col-card li::before {
+  content: '  ';
+  color: var(--accent);
+  margin-right: 8px;
+}
+
+/* ── Comparison: before/after ── */
+.comparison {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-top: 32px;
+}
+
+.comp-card {
+  border-radius: var(--radius);
+  padding: 24px;
+  border: 1px solid var(--border);
+}
+
+.comp-card.before {
+  background: var(--bg-card);
+  opacity: 0.7;
+}
+
+.comp-card.after {
+  background: linear-gradient(135deg, var(--bg-card), var(--accent-dim));
+  border-color: rgba(212, 168, 83, 0.2);
+}
+
+.comp-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  margin-bottom: 12px;
+}
+
+.comp-card.before .comp-label { color: var(--text-muted); }
+.comp-card.after .comp-label { color: var(--accent); }
+
+.comp-items {
+  list-style: none;
+}
+
+.comp-items li {
+  padding: 6px 0;
+  font-size: 14px;
+  color: var(--text-dim);
+}
+
+/* ── Drag/drop mockup ── */
+.drop-zone-demo {
+  margin-top: 32px;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius);
+  padding: 48px;
+  text-align: center;
+  background: var(--accent-dim);
+  animation: pulse-border 2s ease-in-out infinite;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: rgba(212, 168, 83, 0.3); }
+  50% { border-color: var(--accent); }
+}
+
+.drop-icon {
+  font-size: 36px;
+  margin-bottom: 12px;
+  opacity: 0.6;
+}
+
+.drop-text {
+  font-size: 16px;
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.drop-hint {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+/* ── Progressive reveal diagram ── */
+.reveal-steps {
+  display: flex;
+  gap: 20px;
+  margin-top: 32px;
+}
+
+.reveal-step {
+  flex: 1;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  text-align: center;
+}
+
+.reveal-step .step-num {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-dim);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 auto 12px;
+}
+
+.reveal-step .step-title {
+  font-family: 'Instrument Serif', serif;
+  font-size: 17px;
+  margin-bottom: 6px;
+}
+
+.reveal-step .step-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.reveal-arrow {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+/* ── Navigation ── */
+.nav-dots {
+  position: fixed;
+  right: 28px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 100;
+}
+
+.nav-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.nav-dot:hover,
+.nav-dot.active {
+  background: var(--accent);
+  transform: scale(1.3);
+}
+
+/* ── Animations ── */
+.fade-in {
+  animation: fadeIn 0.6s ease both;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.delay-1 { animation-delay: 0.1s; }
+.delay-2 { animation-delay: 0.2s; }
+.delay-3 { animation-delay: 0.3s; }
+.delay-4 { animation-delay: 0.4s; }
+.delay-5 { animation-delay: 0.5s; }
+
+/* ── Responsive ── */
+@media (max-width: 1200px) {
+  .slide { padding: 40px; }
+  h1 { font-size: 56px; }
+  .phase-grid { grid-template-columns: repeat(2, 1fr); }
+  .reveal-steps { flex-wrap: wrap; }
+  .reveal-arrow { display: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- Navigation dots -->
+<nav class="nav-dots" id="navDots"></nav>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<!-- SLIDE 1: Title -->
+<!-- ═══════════════════════════════════════════════════ -->
+<section class="slide title-slide" id="slide-1">
+  <div class="logo-mark">e</div>
+  <h1 class="fade-in">Studio <span class="accent">Roadmap</span></h1>
+  <p class="subtitle fade-in delay-1">A polished, creator-first studio experience.<br>Built on your feedback.</p>
+  <p class="meta fade-in delay-2">Jay Gidwitz &times; Max Carlson &mdash; May 13, 2026</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<!-- SLIDE 2: What We Heard -->
+<!-- ═══════════════════════════════════════════════════ -->
+<section class="slide" id="slide-2">
+  <span class="slide-number">02</span>
+  <h3>Your Feedback</h3>
+  <h2>What we heard</h2>
+  <p class="slide-intro">From our May 7 conversation &mdash; the themes that shaped this roadmap.</p>
+
+  <ul class="feature-list fade-in delay-1">
+    <li><span class="feature-bullet">&#9679;</span><strong>Apple-like simplicity</strong> &mdash; hide technical complexity, focus on the creative process</li>
+    <li><span class="feature-bullet">&#9679;</span><strong>Image morphing</strong> &mdash; select 2-6 images, AI morphs between them with per-transition control</li>
+    <li><span class="feature-bullet">&#9679;</span><strong>Segment re-rendering</strong> &mdash; redo just one bad segment without regenerating everything</li>
+    <li><span class="feature-bullet">&#9679;</span><strong>Upload your own images</strong> &mdash; bring personal work into the studio</li>
+    <li><span class="feature-bullet">&#9679;</span><strong>Better image models</strong> &mdash; Flux, OpenAI alongside existing models</li>
+    <li><span class="feature-bullet">&#9679;</span><strong>Image variations</strong> &mdash; MidJourney-style alternatives, not just same-prompt reruns</li>
+    <li><span class="feature-bullet">&#9679;</span><strong>Polished aesthetic</strong> &mdash; a tool that feels as good as the art it creates</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<!-- SLIDE 3: Roadmap Overview -->
+<!-- ═══════════════════════════════════════════════════ -->
+<section class="slide" id="slide-3">
+  <span class="slide-number">03</span>
+  <h3>Roadmap</h3>
+  <h2>The plan</h2>
+  <p class="slide-intro">Five phases, each delivering a complete capability you can test.</p>
+
+  <div class="phase-grid fade-in delay-1">
+    <div class="phase-card done">
+      <div class="phase-label">Phase 0</div>
+      <div class="phase-title">Baseline</div>
+      <div class="phase-desc">Model swaps (Z Image Turbo, LTX 2.3, Nvidia VSR) and keyframe data model.</div>
+      <span class="phase-status">Complete</span>
+    </div>
+    <div class="phase-card active">
+      <div class="phase-label">Phase 1</div>
+      <div class="phase-title">Flow Builder</div>
+      <div class="phase-desc">Pika-style keyframe strip with per-transition generate, regenerate, and uprez.</div>
+      <span class="phase-status">Up next</span>
+    </div>
+    <div class="phase-card">
+      <div class="phase-label">Phase 2</div>
+      <div class="phase-title">Image Upload</div>
+      <div class="phase-desc">Drag &amp; drop images from desktop. Upload anywhere in studio.</div>
+      <span class="phase-status">Planned</span>
+    </div>
+    <div class="phase-card">
+      <div class="phase-label">Phase 3</div>
+      <div class="phase-title">New Models</div>
+      <div class="phase-desc">Flux (Black Forest Labs) and OpenAI image generation.</div>
+      <span class="phase-status">Planned</span>
+    </div>
+    <div class="phase-card">
+      <div class="phase-label">Phase 4</div>
+      <div class="phase-title">Variations</div>
+      <div class="phase-desc">MidJourney-style image variations &mdash; similar but different alternatives.</div>
+      <span class="phase-status">Planned</span>
+    </div>
+    <div class="phase-card">
+      <div class="phase-label">Continuous</div>
+      <div class="phase-title">UI Polish</div>
+      <div class="phase-desc">Threaded through every phase. Clean, dark, Apple-like aesthetic from day one.</div>
+      <span class="phase-status">Ongoing</span>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<!-- SLIDE 4: Flow Builder Concept -->
+<!-- ═══════════════════════════════════════════════════ -->
+<section class="slide" id="slide-4">
+  <span class="slide-number">04</span>
+  <h3>Phase 1</h3>
+  <h2>The Flow Builder</h2>
+  <p class="slide-intro">The new default studio experience. Arrange keyframes, the system generates transitions between them.</p>
+
+  <div class="comparison fade-in delay-1">
+    <div class="comp-card before">
+      <div class="comp-label">Today</div>
+      <ul class="comp-items">
+        <li>4-tab workflow (Images, Actions, Generate, Results)</li>
+        <li>Combinatorial grid (N images &times; M actions)</li>
+        <li>All controls visible at once</li>
+        <li>Node-graph complexity</li>
+      </ul>
+    </div>
+    <div class="comp-card after">
+      <div class="comp-label">Flow Builder</div>
+      <ul class="comp-items">
+        <li>Single-surface keyframe strip</li>
+        <li>Linear flow (image &rarr; transition &rarr; image)</li>
+        <li>Progressive reveal &mdash; complexity appears when needed</li>
+        <li>Clean, focused, creative</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<!-- SLIDE 5: Progressive Reveal -->
+<!-- ═══════════════════════════════════════════════════ -->
+<section class="slide" id="slide-5">
+  <span class="slide-number">05</span>
+  <h3>Phase 1</h3>
+  <h2>Progressive Reveal</h2>
+  <p class="slide-intro">The interface starts minimal. Sections appear only when relevant.</p>
+
+  <div class="reveal-steps fade-in delay-1">
+    <div class="reveal-step">
+      <div class="step-num">1</div>
+      <div class="step-title">Add images</div>
+      <div class="step-desc">Just the keyframe strip and add buttons. Nothing else.</div>
+    </div>
+    <span class="reveal-arrow">&rarr;</span>
+    <div class="reveal-step">
+      <div class="step-num">2</div>
+      <div class="step-title">Settings appear</div>
+      <div class="step-desc">2+ keyframes added. Prompt, duration, model controls fade in.</div>
+    </div>
+    <span class="reveal-arrow">&rarr;</span>
+    <div class="reveal-step">
+      <div class="step-num">3</div>
+      <div class="step-title">Results appear</div>
+      <div class="step-desc">Generation started. Transition progress cards fade in below.</div>
+    </div>
+    <span class="reveal-arrow">&rarr;</span>
+    <div class="reveal-step">
+      <div class="step-num">4</div>
+      <div class="step-title">Actions appear</div>
+      <div class="step-desc">All done. Uprez, preview, and export options reveal.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<!-- SLIDE 6: Flow Builder Mockup -->
+<!-- ═══════════════════════════════════════════════════ -->
+<section class="slide" id="slide-6" style="padding: 40px 60px;">
+  <span class="slide-number">06</span>
+  <h3>Phase 1 &mdash; Mockup</h3>
+  <h2 style="margin-bottom: 4px;">Flow Builder</h2>
+  <p class="slide-intro" style="margin-bottom: 24px;">Full state &mdash; keyframes arranged, settings configured, results streaming.</p>
+
+  <div class="mockup-container fade-in delay-1">
+    <div class="mockup-titlebar">
+      <div class="mockup-dot"></div>
+      <div class="mockup-dot"></div>
+      <div class="mockup-dot"></div>
+      <div class="mockup-url">infinidream.ai/studio</div>
+    </div>
+    <div class="mockup-body">
+      <!-- Studio header -->
+      <div class="studio-header">
+        <div class="studio-title">Studio</div>
+        <div class="mode-toggle">
+          <div class="mode-btn active">Flow</div>
+          <div class="mode-btn">Batch (Advanced)</div>
+        </div>
+      </div>
+
+      <!-- Keyframe strip -->
+      <div class="keyframe-section">
+        <div class="section-label">Keyframes</div>
+        <div class="keyframe-strip">
+          <div class="keyframe-card">
+            <div class="kf-placeholder" style="background: linear-gradient(135deg, #2a1a30, #1a2535);">nebula</div>
+            <div class="kf-number">1</div>
+          </div>
+
+          <div class="transition-connector">
+            <div class="t-duration">5s</div>
+            <div class="t-line"></div>
+            <div class="t-click-hint">click to edit</div>
+          </div>
+
+          <div class="keyframe-card">
+            <div class="kf-placeholder" style="background: linear-gradient(135deg, #1a2535, #15302a);">crystal</div>
+            <div class="kf-number">2</div>
+          </div>
+
+          <div class="transition-connector">
+            <div class="t-duration">8s</div>
+            <div class="t-line"></div>
+            <div class="t-click-hint">click to edit</div>
+          </div>
+
+          <div class="keyframe-card">
+            <div class="kf-placeholder" style="background: linear-gradient(135deg, #15302a, #2a2515);">forest</div>
+            <div class="kf-number">3</div>
+          </div>
+
+          <div class="transition-connector">
+            <div class="t-duration">5s</div>
+            <div class="t-line"></div>
+            <div class="t-click-hint">click to edit</div>
+          </div>
+
+          <div class="keyframe-card">
+            <div class="kf-placeholder" style="background: linear-gradient(135deg, #2a2515, #251520);">void</div>
+            <div class="kf-number">4</div>
+          </div>
+        </div>
+
+        <div class="add-buttons">
+          <div class="add-btn"><span class="plus">+</span> Generate</div>
+          <div class="add-btn"><span class="plus">+</span> Upload</div>
+          <div class="add-btn"><span class="plus">+</span> From Playlist</div>
+        </div>
+      </div>
+
+      <!-- Settings -->
+      <div class="settings-section">
+        <div class="section-label">Transition Settings</div>
+        <div class="settings-row">
+          <div class="field wide">
+            <div class="field-label">Global Prompt</div>
+            <input class="field-input" value="smooth cinematic morph, dreamlike motion" readonly>
+          </div>
+          <div class="field">
+            <div class="field-label">Duration</div>
+            <select class="field-select">
+              <option>5 sec</option>
+            </select>
+          </div>
+          <div class="field">
+            <div class="field-label">Model</div>
+            <select class="field-select">
+              <option>LTX 2.3</option>
+            </select>
+          </div>
+          <button class="generate-btn">Generate All</button>
+        </div>
+      </div>
+
+      <!-- Results -->
+      <div class="results-section">
+        <div class="section-label">Results</div>
+        <div class="results-strip">
+          <div class="result-card">
+            <div class="result-thumb done">
+              <span class="result-status done">&#10003; Complete</span>
+            </div>
+            <div class="result-label">nebula &rarr; crystal &middot; 5s</div>
+          </div>
+          <div class="result-card">
+            <div class="result-thumb processing">
+              <span class="result-status processing">45%</span>
+              <div class="result-progress" style="width: 45%;"></div>
+            </div>
+            <div class="result-label">crystal &rarr; forest &middot; 8s</div>
+          </div>
+          <div class="result-card">
+            <div class="result-thumb queued">
+              <span class="result-status queued">Queued</span>
+            </div>
+            <div class="result-label">forest &rarr; void &middot; 5s</div>
+          </div>
+        </div>
+        <div class="action-bar">
+          <button class="action-btn">Preview All</button>
+          <button class="action-btn primary">Uprez All</button>
+          <button class="action-btn">Save to Playlist</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<!-- SLIDE 7: Per-Transition Editor -->
+<!-- ═══════════════════════════════════════════════════ -->
+<section class="slide" id="slide-7">
+  <span class="slide-number">07</span>
+  <h3>Phase 1</h3>
+  <h2>Per-transition control</h2>
+  <p class="slide-intro">Click any transition gap to override its prompt and duration. Click a completed result to regenerate just that segment.</p>
+
+  <div class="two-col fade-in delay-1">
+    <div>
+      <h4 style="font-family: 'Instrument Serif', serif; font-size: 20px; margin-bottom: 16px; color: var(--text-dim);">Generate a single transition</h4>
+      <div class="ie-strip">
+        <div class="ie-card">nebula</div>
+        <div class="ie-editor">
+          <div class="field">
+            <div class="field-label">Prompt</div>
+            <input class="field-input" value="zoom into crystal cave" readonly style="width:100%; font-size:12px; padding:7px 10px;">
+          </div>
+          <div class="field">
+            <div class="field-label">Duration</div>
+            <select class="field-select" style="width:100%; font-size:12px; padding:7px 10px;">
+              <option>8 sec</option>
+            </select>
+          </div>
+          <div class="ie-btn-row">
+            <button class="ie-gen-btn">Generate</button>
+            <button class="ie-close-btn">&times;</button>
+          </div>
+        </div>
+        <div class="ie-card">crystal</div>
+      </div>
+    </div>
+
+    <div>
+      <h4 style="font-family: 'Instrument Serif', serif; font-size: 20px; margin-bottom: 16px; color: var(--text-dim);">Regenerate a bad segment</h4>
+      <div class="ie-strip">
+        <div class="ie-card">crystal</div>
+        <div class="ie-editor">
+          <div style="height:48px; background:var(--bg); border-radius:6px; display:flex; align-items:center; justify-content:center; margin-bottom:10px; border: 1px solid var(--border);">
+            <span style="font-size:11px; color:var(--success);">&#10003; current result</span>
+          </div>
+          <div class="field">
+            <div class="field-label">Prompt</div>
+            <input class="field-input" value="gentle float through trees" readonly style="width:100%; font-size:12px; padding:7px 10px;">
+          </div>
+          <div class="ie-btn-row">
+            <button class="ie-gen-btn">Regenerate</button>
+            <button class="ie-close-btn">&times;</button>
+          </div>
+        </div>
+        <div class="ie-card">forest</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<!-- SLIDE 8: Upload & Drop -->
+<!-- ═══════════════════════════════════════════════════ -->
+<section class="slide" id="slide-8">
+  <span class="slide-number">08</span>
+  <h3>Phase 2</h3>
+  <h2>Image Upload</h2>
+  <p class="slide-intro">Drag and drop images from your desktop anywhere in the studio. Or click upload.</p>
+
+  <div class="two-col fade-in delay-1">
+    <div>
+      <div class="drop-zone-demo">
+        <div class="drop-icon">&#8615;</div>
+        <div class="drop-text">Drop images anywhere</div>
+        <div class="drop-hint">JPG, PNG, WEBP &mdash; added as keyframes</div>
+      </div>
+    </div>
+    <div>
+      <ul class="feature-list" style="margin-top: 0;">
+        <li><span class="feature-bullet">&#9679;</span><strong>Works in both modes</strong> &mdash; flow builder and batch mode</li>
+        <li><span class="feature-bullet">&#9679;</span><strong>No resize needed</strong> &mdash; video models handle any aspect ratio</li>
+        <li><span class="feature-bullet">&#9679;</span><strong>Existing backend</strong> &mdash; uses keyframe upload API already built</li>
+        <li><span class="feature-bullet">&#9679;</span><strong>Visual feedback</strong> &mdash; border glow on drag over</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<!-- SLIDE 9: New Models + Variations -->
+<!-- ═══════════════════════════════════════════════════ -->
+<section class="slide" id="slide-9">
+  <span class="slide-number">09</span>
+  <h3>Phases 3 &amp; 4</h3>
+  <h2>Models &amp; Variations</h2>
+  <p class="slide-intro">Expand the image generation toolkit, then add MidJourney-style variations.</p>
+
+  <div class="two-col fade-in delay-1">
+    <div class="col-card">
+      <h4>Phase 3: New Image Models</h4>
+      <ul>
+        <li><strong>Flux</strong> (Black Forest Labs) &mdash; closest open-source MidJourney competitor</li>
+        <li><strong>OpenAI</strong> (gpt-image-1) &mdash; high quality, different aesthetic</li>
+        <li>Added to existing model picker dropdown</li>
+        <li>Same pattern as Z Image Turbo integration</li>
+      </ul>
+    </div>
+    <div class="col-card">
+      <h4>Phase 4: Image Variations</h4>
+      <ul>
+        <li>Right-click any keyframe &rarr; "Generate Variations"</li>
+        <li>4-8 alternatives in a mini-grid</li>
+        <li>Click to swap into the flow</li>
+        <li>Uses img2img from Flux / OpenAI</li>
+        <li>Avoids repetitive artifacts from same-prompt reruns</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<!-- SLIDE 10: Design Direction -->
+<!-- ═══════════════════════════════════════════════════ -->
+<section class="slide" id="slide-10">
+  <span class="slide-number">10</span>
+  <h3>Design</h3>
+  <h2>UI Direction</h2>
+  <p class="slide-intro">Not a separate phase. Every feature ships looking like this.</p>
+
+  <div class="phase-grid fade-in delay-1" style="grid-template-columns: repeat(2, 1fr);">
+    <div class="phase-card">
+      <div class="phase-title">Progressive Disclosure</div>
+      <div class="phase-desc">Start with nothing. Reveal controls as they become relevant. Advanced settings behind an expandable "brain icon" &mdash; most users never see inference steps or guidance scales.</div>
+    </div>
+    <div class="phase-card">
+      <div class="phase-title">Dark &amp; Minimal</div>
+      <div class="phase-desc">Dark theme, generous spacing, refined typography. No cramped controls. The interface recedes so the art is the focus. Pika-level polish.</div>
+    </div>
+    <div class="phase-card">
+      <div class="phase-title">Smooth Motion</div>
+      <div class="phase-desc">Fade/slide animations for progressive reveal. Settings don't pop in &mdash; they ease in. Every interaction feels intentional and crafted.</div>
+    </div>
+    <div class="phase-card">
+      <div class="phase-title">Two Modes</div>
+      <div class="phase-desc">Flow (default) for most creators. Batch (Advanced) for power users who want the combinatorial grid. Same design language, different complexity.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<!-- SLIDE 11: Next Steps -->
+<!-- ═══════════════════════════════════════════════════ -->
+<section class="slide title-slide" id="slide-11">
+  <span class="slide-number">11</span>
+  <h3>Next Steps</h3>
+  <h1 class="fade-in" style="font-size: 56px;">Phase 1: <span class="accent">Flow Builder</span></h1>
+  <p class="subtitle fade-in delay-1" style="max-width: 500px;">
+    We start here. Keyframe strip, per-transition control, regeneration, uprez. The foundation everything else builds on.
+  </p>
+  <div style="margin-top: 48px;" class="fade-in delay-2">
+    <ul class="feature-list" style="max-width: 480px; margin: 0 auto; text-align: left;">
+      <li><span class="feature-bullet">&#9679;</span><strong>Your input needed</strong> &mdash; does this flow match how you'd want to work?</li>
+      <li><span class="feature-bullet">&#9679;</span><strong>Priority check</strong> &mdash; anything we should add or reorder?</li>
+      <li><span class="feature-bullet">&#9679;</span><strong>Design feedback</strong> &mdash; does this aesthetic direction feel right?</li>
+    </ul>
+  </div>
+</section>
+
+<script>
+// ── Navigation dots ──
+const slides = document.querySelectorAll('.slide');
+const navDots = document.getElementById('navDots');
+
+slides.forEach((_, i) => {
+  const dot = document.createElement('div');
+  dot.className = 'nav-dot';
+  dot.addEventListener('click', () => {
+    slides[i].scrollIntoView({ behavior: 'smooth' });
+  });
+  navDots.appendChild(dot);
+});
+
+// Update active dot on scroll
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      const index = Array.from(slides).indexOf(entry.target);
+      document.querySelectorAll('.nav-dot').forEach((d, i) => {
+        d.classList.toggle('active', i === index);
+      });
+    }
+  });
+}, { threshold: 0.5 });
+
+slides.forEach(s => observer.observe(s));
+
+// ── Keyboard navigation ──
+document.addEventListener('keydown', (e) => {
+  const current = Array.from(slides).findIndex(s => {
+    const rect = s.getBoundingClientRect();
+    return rect.top >= -100 && rect.top < window.innerHeight / 2;
+  });
+
+  if (e.key === 'ArrowDown' || e.key === ' ' || e.key === 'PageDown') {
+    e.preventDefault();
+    if (current < slides.length - 1) slides[current + 1].scrollIntoView({ behavior: 'smooth' });
+  }
+  if (e.key === 'ArrowUp' || e.key === 'PageUp') {
+    e.preventDefault();
+    if (current > 0) slides[current - 1].scrollIntoView({ behavior: 'smooth' });
+  }
+});
+</script>
+</body>
+</html>
