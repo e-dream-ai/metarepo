@@ -175,7 +175,9 @@ export async function uploadKeyframeImage(file: File): Promise<UploadResult> {
   );
 
   // Step 5: Fetch finalized keyframe
-  const kfRes = await axiosClient.get(`/v1/keyframe/${keyframeUuid}`);
+  const kfRes = await axiosClient.get(`/v1/keyframe/${keyframeUuid}`, {
+    headers,
+  });
   const kfData = kfRes.data.data.keyframe;
 
   return {
@@ -294,7 +296,46 @@ also accepts direct URLs, so pass the CDN image URL instead."
 
 ---
 
-### Task 4: Add Upload to Images Tab
+### Task 4: Fix Keyframe UUID Bug in Batch Submit
+
+**Files:**
+- Modify: `frontend/src/components/pages/studio/hooks/useBatchSubmit.ts`
+
+**Context:** Same bug as Task 3, but in batch mode. `useBatchSubmit` passes `image.uuid` to `buildVideoAlgoParams`. For uploaded images, this is a keyframe UUID which will 404 on the worker's dream endpoint. Fix: pass `image.url` when it's a direct HTTP URL (uploaded images), fall back to `image.uuid` for generated images (dream UUIDs that the worker can resolve).
+
+- [ ] **Step 1: Fix the imageUuid parameter**
+
+In `useBatchSubmit.ts`, change the `buildVideoAlgoParams` call (around line 92-95):
+
+```typescript
+// Change this line:
+              imageUuid: image.uuid,
+// To:
+              imageUuid: image.url?.startsWith("http") ? image.url : image.uuid,
+```
+
+This passes the CDN image URL for uploaded images (whose `url` field is a direct HTTP URL) and the dream UUID for generated images (whose `url` field is empty or a relative path resolved by `PresignedImage`).
+
+- [ ] **Step 2: Run type-check**
+
+Run: `cd /Users/maxcarlsonold/edream/frontend && pnpm type-check`
+Expected: No errors
+
+- [ ] **Step 3: Commit**
+
+```bash
+cd /Users/maxcarlsonold/edream/frontend
+git add src/components/pages/studio/hooks/useBatchSubmit.ts
+git commit -m "fix(studio): pass image URL instead of keyframe UUID in batch submit
+
+Same fix as flow mode — the worker resolves UUIDs via GET /dream/{uuid}
+which doesn't handle keyframe UUIDs. Pass the direct CDN URL for uploaded
+images so the worker can fetch the image directly."
+```
+
+---
+
+### Task 5: Add Upload to Images tab
 
 **Files:**
 - Modify: `frontend/src/components/pages/studio/components/images-tab.tsx`
@@ -318,6 +359,14 @@ export const ImagesTabContainer = styled.div<{ $dragOver?: boolean }>`
     border-color: ${props.theme.colorPrimary};
   `}
 `;
+
+// Add after LightboxImage — same styling but for plain <img> (uploaded images)
+export const LightboxUploadedImage = styled.img`
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 8px;
+`;
 ```
 
 - [ ] **Step 2: Add upload functionality to ImagesTab**
@@ -325,12 +374,15 @@ export const ImagesTabContainer = styled.div<{ $dragOver?: boolean }>`
 In `images-tab.tsx`, add imports and upload handling:
 
 ```typescript
-// Add to imports
-import { useRef, useCallback } from "react";
+// Update the existing React import to add useRef:
+import React, { useCallback, useMemo, useRef, useState } from "react";
+
+// Add new imports:
 import { v4 as uuidv4 } from "uuid";
 import { useFileDropUpload } from "../hooks/useFileDropUpload";
 import { uploadKeyframeImage } from "@/components/pages/studio/utils/upload-keyframe-image";
-import { ImagesTabContainer } from "./images-tab.styled";
+// Add ImagesTabContainer and LightboxUploadedImage to the styled import:
+import { ImagesTabContainer, LightboxUploadedImage } from "./images-tab.styled";
 
 // Inside ImagesTab component, after existing store selectors:
 const updateImage = useStudioStore((s) => s.updateImage);
@@ -560,16 +612,7 @@ return (
         {(() => {
           const img = images.find((i) => i.uuid === expandedImageUuid);
           return img?.url.startsWith("http") ? (
-            <img
-              src={img.url}
-              alt="Expanded"
-              style={{
-                maxWidth: "90vw",
-                maxHeight: "90vh",
-                objectFit: "contain",
-                borderRadius: "8px",
-              }}
-            />
+            <LightboxUploadedImage src={img.url} alt="Expanded" />
           ) : (
             <LightboxImage dreamUuid={expandedImageUuid} alt="Expanded" />
           );
@@ -600,7 +643,7 @@ git commit -m "feat(studio): add image upload button and drag-and-drop to batch 
 
 ---
 
-### Task 5: Add Studio-Wide Drag-and-Drop
+### Task 6: Add Studio-Wide Drag-and-Drop
 
 **Files:**
 - Modify: `frontend/src/components/pages/studio/studio.page.tsx`
@@ -733,7 +776,7 @@ git commit -m "feat(studio): add studio-wide drag-and-drop for image upload"
 
 ---
 
-### Task 6: Final Verification
+### Task 7: Final Verification
 
 **Files:** All previously created/modified files
 
@@ -786,11 +829,12 @@ Verify:
 | `studio/utils/upload-keyframe-image.ts` | Shared multipart upload utility |
 | `studio/utils/__tests__/upload-keyframe-image.test.ts` | Upload utility tests |
 
-### Modified Files (5)
+### Modified Files (6)
 | File | Change |
 |------|--------|
 | `studio/components/flow-builder.tsx` | Use shared upload utility (extract inline code) |
 | `studio/hooks/useFlowGeneration.ts` | Pass `imageUrl` instead of `keyframeUuid` (bugfix) |
+| `studio/hooks/useBatchSubmit.ts` | Pass image URL instead of keyframe UUID for uploaded images (bugfix) |
 | `studio/components/images-tab.tsx` | Upload button, drag-drop, conditional image rendering |
-| `studio/components/images-tab.styled.tsx` | `ImagesTabContainer` with drag-over style |
+| `studio/components/images-tab.styled.tsx` | `ImagesTabContainer`, `LightboxUploadedImage` |
 | `studio/studio.page.tsx` + `.styled.tsx` | Studio-wide drag-and-drop handler |
