@@ -14,7 +14,7 @@
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Preset system | Reuse existing `StudioAction` presets | Consistent with batch mode, already model-scoped |
+| Preset system | Reuse existing `StudioAction` presets + `buildVideoAlgoParams` | Consistent with batch mode, already model-scoped. `buildVideoAlgoParams` handles `wan-i2v` → `wan-i2v-lora` auto-upgrade and all payload construction |
 | Per-transition editor placement | Panel below strip | Keeps strip layout stable, more room for controls |
 | Results display | Inline on gaps | Spatial — gap becomes a living element showing transition state |
 | Client-side preview | Inline player + lightbox expand | Small preview in context, click to expand. Matches existing `LightboxOverlay` pattern |
@@ -179,6 +179,40 @@ Additional fields when expanded:
 
 Selecting a preset fills prompt and LoRAs as starting values (from `StudioAction`). Duration and model are **independent controls** — `StudioAction` does not carry these fields. Presets are filtered by the currently selected model via `PresetPack.model`. User can customize prompt/LoRAs after selecting.
 
+#### Model / Preset / Duration Reactivity
+
+The settings panel fields are reactive to each other. The existing `buildVideoAlgoParams` and `getAllowedDurationsForActions` functions are the source of truth — the panel calls them, not reimplements them.
+
+**Cascade rules:**
+
+1. **Model changes** →
+   - Preset dropdown re-filters to `PresetPack`s matching the new model (via `PresetPack.model`)
+   - Duration options update (LTX: 5/10/15/20s, Wan: 5/8/10s)
+   - LoRA dropdown re-filters to model-appropriate LoRAs
+   - If current preset is invalid for new model → clear preset selection
+   - If current duration is invalid for new model → snap to closest valid duration
+
+2. **Preset changes** →
+   - Prompt textarea fills from `StudioAction.prompt`
+   - LoRAs fill from `StudioAction.highNoiseLoras` / `lowNoiseLoras`
+   - If preset has LoRAs (Wan camera presets) → duration clamps to 5/8s only (via `getAllowedDurationsForActions`)
+   - If current duration is no longer valid → snap to closest valid duration
+
+3. **Duration changes** → no cascading effects (duration doesn't affect other fields)
+
+**Algorithm dispatch (invisible to user):**
+
+The user never sees `wan-i2v-lora` as a model option. When generating, `buildVideoAlgoParams` checks if the resolved action has LoRAs:
+- If yes → dispatches as `wan-i2v-lora` (with `high_noise_loras` / `low_noise_loras` in payload)
+- If no → dispatches as `wan-i2v` (prompt-only payload)
+- LTX always includes a LoRA (defaults to "static camera" if none specified)
+
+**Source image field (model-dependent):**
+- Wan models: `image` field (accepts keyframe image URL or UUID)
+- LTX: `source_dream_uuid` field (accepts dream/image UUID)
+
+The `useFlowGeneration` hook must map keyframe data to the correct field name per model. `buildVideoAlgoParams` already handles this — pass the keyframe's image reference as the `imageUuid` parameter.
+
 #### Per-transition mode differences
 
 - Header: "Editing: {fromName} → {toName}"
@@ -231,12 +265,16 @@ Buttons use the existing flow design tokens: `bgElevated` background, `border` b
 
 Each transition generates one dream via a two-step API sequence (the creation endpoint does not accept keyframe IDs — they're attached via update):
 
-1. **Create dream** via `useCreateDreamFromPrompt` → `POST /v1/dream`:
+1. **Build payload** via `buildVideoAlgoParams(model, action, imageUuid, duration)`:
+   - This existing function handles all model-specific dispatch:
+     - Wan without LoRAs → `{ infinidream_algorithm: "wan-i2v", prompt, image, duration, ... }`
+     - Wan with LoRAs → `{ infinidream_algorithm: "wan-i2v-lora", prompt, image, duration, high_noise_loras, low_noise_loras, ... }`
+     - LTX → `{ infinidream_algorithm: "ltx-i2v", prompt, source_dream_uuid, duration, high_noise_loras, ... }`
+   - `imageUuid`: pass the from-keyframe's image reference. The keyframe's `image` field is an R2 CDN URL; the worker's `resolveImageFromDreamUuid` can resolve URLs — verify this works for keyframe image URLs (not just dream UUIDs).
+
+2. **Create dream** via `useCreateDreamFromPrompt` → `POST /v1/dream`:
    - `name`: auto-generated from keyframe pair (e.g., "nebula → crystal")
-   - `prompt`: JSON-encoded algorithm params, structured per model:
-     - **LTX I2V**: `{ infinidream_algorithm: "ltx-i2v", prompt, source_dream_uuid, duration, ...loraParams }`
-     - **Wan I2V**: `{ infinidream_algorithm: "wan-i2v", prompt, image, duration, ...loraParams }`
-   - Note: `source_dream_uuid` (LTX) and `image` (Wan) expect a dream/image UUID, not a keyframe UUID. The from-keyframe's `image` URL or associated dream UUID must be resolved. If keyframes don't have an associated dream, the keyframe's `image` field (R2 CDN URL) may work directly for Wan's `image` param — verify with backend.
+   - `prompt`: JSON-stringified output from `buildVideoAlgoParams`
 
 2. **Attach keyframes** via `PUT /v1/dream/:uuid`:
    - `startKeyframe`: from keyframe's `keyframeUuid`
@@ -320,7 +358,9 @@ Uses existing uprez job handlers (`nvidia-uprez` / `uprez`):
 ### Existing components reused
 
 - `LightboxOverlay` styling pattern from `images-tab.styled.tsx` — referenced for consistent overlay design (but new `VideoLightbox` created for video)
-- `StudioAction` presets — for preset picker population
+- `StudioAction` presets + `PresetPack` model scoping — for preset picker population
+- `buildVideoAlgoParams` — single function for all model-specific payload construction + algorithm dispatch
+- `getAllowedDurationsForActions` — reactive duration constraint logic
 - Socket.IO progress pattern from `useStudioJobProgress` — adapted for flow transitions
 - Dream creation hooks — for submitting generation jobs
 
