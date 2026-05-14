@@ -34,9 +34,13 @@ This matches how "Add from Playlist" already stores `dream.thumbnail` in the `ur
 
 ### Video Generation Compatibility
 
-Flow mode already passes keyframe UUIDs to `buildVideoAlgoParams` as the `imageUuid` parameter, and the backend resolves them correctly for wan-i2v and wan-i2v-lora (the `image` field accepts keyframe UUIDs).
+**Important finding:** The worker resolves image references via `resolveImageFromDreamUuid()` which calls `GET /dream/{uuid}`. Keyframes and Dreams are **separate entities** — a keyframe UUID will 404 on the dream endpoint. However, `processImageForEndpoint()` also accepts **direct URLs** (checks `startsWith('http')` before trying UUID resolution).
 
-For ltx-i2v, the `source_dream_uuid` field specifically expects a dream UUID. **Uploaded images will not work with ltx-i2v.** This is acceptable for Phase 2 — the UI should disable or hide uploaded images when ltx-i2v is the selected model, with a tooltip explaining why. This matches the existing pattern where LoRA-enabled presets restrict available durations.
+**Solution:** Pass the **image URL** (not the keyframe UUID) in the `image` / `source_dream_uuid` fields. The worker accepts URLs for all models — wan-i2v, wan-i2v-lora, and ltx-i2v all go through `processImageForEndpoint()` which handles URLs directly.
+
+For batch mode uploads: `StudioImage.url` already holds the CDN image URL. Pass this URL to `buildVideoAlgoParams` as `imageUuid` (the param name is misleading — it accepts URLs too).
+
+**Phase 1 bug (flow mode):** `useFlowGeneration.ts` currently passes `fromKf.keyframeUuid` (a keyframe UUID) to `buildVideoAlgoParams`. This will fail at the worker. Fix: pass `fromKf.imageUrl` instead. This fix should be included in Phase 2's implementation since it touches the same `buildVideoAlgoParams` call path.
 
 ### Shared Upload Utility
 
@@ -96,7 +100,6 @@ Replace the inline upload sequence with a call to the shared `uploadKeyframeImag
 
 ## Known Limitations
 
-- Uploaded images cannot be used with ltx-i2v (needs dream UUID for `source_dream_uuid`). UI greys them out when ltx-i2v is selected.
 - No file size limit enforced client-side. Large files will upload slowly but won't break.
 - No duplicate detection — dropping the same file twice creates two keyframes.
 
@@ -109,3 +112,4 @@ Replace the inline upload sequence with a call to the shared `uploadKeyframeImag
 | `studio/components/images-tab.styled.tsx` | **Modify** — add drag-over style to container |
 | `studio/components/flow-builder.tsx` | **Modify** — extract inline upload to shared utility |
 | `studio/studio.page.tsx` | **Modify** — add studio-wide drag-and-drop handler |
+| `studio/hooks/useFlowGeneration.ts` | **Bugfix** — pass `imageUrl` instead of `keyframeUuid` to `buildVideoAlgoParams` |
