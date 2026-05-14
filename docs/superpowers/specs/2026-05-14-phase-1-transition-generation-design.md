@@ -19,7 +19,7 @@
 | Results display | Inline on gaps | Spatial — gap becomes a living element showing transition state |
 | Client-side preview | Inline player + lightbox expand | Small preview in context, click to expand. Matches existing `LightboxOverlay` pattern |
 | "Generate All" with overrides | Respect per-transition overrides | Global settings fill gaps, overrides always win |
-| Regeneration | Same panel, "Regenerate" button, new seed | Simple lever-pull. Phase 4 adds multi-variation comparison |
+| Regeneration | Same panel, "Regenerate" button | Re-submits same params; worker generates new random seed. Phase 4 adds multi-variation comparison |
 
 ---
 
@@ -76,8 +76,8 @@ interface FlowStoreState {
   transitions: FlowTransition[];
 
   // Phase 1 — UI state
-  selectedTransitionIndex: number | null;  // which gap is selected
-  settingsExpanded: boolean;               // collapsed vs expanded settings
+  selectedTransitionIndex: number | null;  // which gap is selected (null = global mode)
+  settingsExpanded: boolean;               // collapsed vs expanded settings (preserved when switching between global/per-transition modes)
 
   // Phase 1 — actions
   setGlobalPreset: (id: string) => void;
@@ -106,7 +106,7 @@ Transitions are derived from adjacent keyframe pairs. When keyframes change (add
 3. If match found: preserve overrides, dreamUuid, status (carry forward existing state)
 4. If no match: create new transition with `status: "idle"` and no overrides
 
-When loop is enabled, the loop keyframe pair (last real keyframe → first keyframe) generates a transition like any other.
+When loop is enabled, the loop transition pair uses `fromKeyframeId: keyframes[last].id` and `toKeyframeId: keyframes[0].id` — NOT `"__loop__"`. The `__loop__` synthetic keyframe only exists for visual rendering in `keyframesWithLoop()`; transitions must reference real keyframe IDs so they can be matched on reload and so `keyframeUuid` can be resolved for generation. `recomputeTransitions()` must use `keyframesWithLoop()` to discover pairs but store real IDs on the resulting transitions.
 
 ### Persistence & Hydration
 
@@ -127,7 +127,7 @@ The gap between keyframes evolves through 6 visual states:
 | State | Visual | Interaction |
 |-------|--------|-------------|
 | **Empty** | Dashed line (`#2a2a30`) | Click → open settings panel |
-| **Configured** | Gold dashed line (`#d4a853`) + duration label | Click → open settings panel |
+| **Configured** | Gold dashed line (`#d4a853`) + duration label | Click → open settings panel. A gap is "configured" when it has any per-transition override set (presetOverride, promptOverride, durationOverride, modelOverride, or loraOverride). |
 | **Queued** | Mini thumbnail (48×34px) with "queued" text | Non-interactive |
 | **Processing** | Mini thumbnail with percentage + progress bar | Non-interactive |
 | **Complete** | Mini thumbnail with ✓ checkmark, green duration | Click → open preview / settings |
@@ -234,6 +234,7 @@ The `useFlowGeneration` hook must map keyframe data to the correct field name pe
 - Header: "Editing: {fromName} → {toName}"
 - Button says "Generate" (not "Generate All")
 - "Regenerate" if transition is already complete
+- "Reset to defaults" link — calls `clearTransitionOverride(index)` to remove all overrides, reverting to global settings
 - Close button (×) to deselect and return to global mode
 
 #### Animations
@@ -283,7 +284,7 @@ Each transition generates one dream via a two-step API sequence (the creation en
 
 1. **Build payload** via `buildVideoAlgoParams({ model, action, imageUuid, imageSize, duration, numInferenceSteps, guidance })`:
    - Full signature requires: `model`, `action` (prompt + LoRAs), `imageUuid`, `imageSize`, `duration`, `numInferenceSteps`, `guidance`
-   - `imageSize`: pass `undefined` — Wan defaults to `"1280*720"` on the worker, LTX ignores it. Alternatively, resolve from keyframe image dimensions if available.
+   - `imageSize`: pass `undefined` — `buildVideoAlgoParams` applies `"1280*720"` as default for plain `wan-i2v` in the frontend; the field is omitted entirely for `wan-i2v-lora` and LTX. Alternatively, resolve from keyframe image dimensions if available.
    - `numInferenceSteps` and `guidance`: from global or per-transition override settings (defaults: 30, 5.0). Only used by Wan models; LTX ignores them (worker controls steps internally).
    - This existing function handles all model-specific dispatch:
      - Wan without LoRAs → `{ infinidream_algorithm: "wan-i2v", prompt, image, duration, num_inference_steps, guidance, ... }`
@@ -291,21 +292,23 @@ Each transition generates one dream via a two-step API sequence (the creation en
      - LTX → `{ infinidream_algorithm: "ltx-i2v", prompt, source_dream_uuid, duration, high_noise_loras, ... }`
    - **Image reference resolution**: `imageUuid` must be a dream UUID or a value the worker can resolve. `FlowKeyframe.imageUrl` is an R2 CDN URL, not a UUID. The worker's `resolveImageFromDreamUuid` handles URLs for Wan (`image` field), but LTX's `source_dream_uuid` field expects a UUID. **Implementation must resolve this**: either (a) verify the worker accepts URLs in `source_dream_uuid`, (b) use the keyframe's backend UUID and let the worker resolve the image, or (c) add a `keyframeImageUuid` field to `FlowKeyframe` that stores the image's UUID separately from the display URL. Option (b) is preferred — pass `keyframeUuid` and add a backend endpoint or worker logic to resolve keyframe → image.
 
-2. **Create dream** via `useCreateDreamFromPrompt` → `POST /v1/dream`:
+2. **Create dream** via `axiosClient.post("/v1/dream", ...)` (NOT via `useCreateDreamFromPrompt` mutation hook — `useFlowGeneration` needs to fire multiple creations in a loop for "Generate All", which is incompatible with calling a `useMutation` hook repeatedly):
    - `name`: auto-generated from keyframe pair (e.g., "nebula → crystal")
    - `prompt`: JSON-stringified output from `buildVideoAlgoParams`
 
-2. **Attach keyframes** via `PUT /v1/dream/:uuid`:
+3. **Attach keyframes** via `axiosClient.put("/v1/dream/${uuid}", ...)`:
    - `startKeyframe`: from keyframe's `keyframeUuid`
    - `endKeyframe`: to keyframe's `keyframeUuid`
 
-3. Store `dreamUuid` on the transition, set status to `"queue"`
+4. Store `dreamUuid` on the transition, set status to `"queue"`
 
-4. Join Socket.IO room for progress tracking
+5. Join Socket.IO room for progress tracking
 
 ### "Generate All" logic
 
 ```
+if no transitions have status === "idle" or "failed" → button is disabled (all done or in-flight)
+
 for each transition:
   if status === "processed" → skip (already done)
   if status === "processing" or "queue" → skip (in flight)
@@ -325,7 +328,7 @@ New hook (`useFlowJobProgress`) modeled after `useStudioJobProgress` — a full 
 
 1. User clicks a completed gap → settings panel opens in per-transition mode
 2. Button says "Regenerate"
-3. On click: create new dream with same effective settings (new random seed)
+3. On click: create new dream with same effective settings. No explicit seed parameter is needed — `wan-i2v` gets a random seed from the worker automatically, and `wan-i2v-lora` passes `seed: -1` (random) via `buildVideoAlgoParams`. Re-submitting the same parameters produces a different result each time.
 4. Old `dreamUuid` is replaced — previous result is discarded
 5. Status resets to "queue", progress tracking begins
 
@@ -361,7 +364,7 @@ Uses existing uprez job handlers (`nvidia-uprez` / `uprez`):
 | `components/.../flow-action-bar.tsx` | Preview All / Uprez All / Save buttons |
 | `components/.../flow-action-bar.styled.tsx` | Action bar styles |
 | `hooks/useFlowJobProgress.ts` | Socket.IO progress tracking for flow transitions |
-| `hooks/useFlowGeneration.ts` | Dream creation logic for transitions |
+| `hooks/useFlowGeneration.ts` | Dream creation logic for transitions (uses `axiosClient` directly, not mutation hooks) |
 
 ### Modified files
 
@@ -381,7 +384,7 @@ Uses existing uprez job handlers (`nvidia-uprez` / `uprez`):
 - `buildVideoAlgoParams` — single function for all model-specific payload construction + algorithm dispatch
 - `getAllowedDurationsForActions` — reactive duration constraint logic
 - Socket.IO progress pattern from `useStudioJobProgress` — reimplemented as `useFlowJobProgress` targeting flow store
-- Dream creation hooks — for submitting generation jobs
+- `axiosClient` — direct API calls for dream creation/update (not mutation hooks, since generation loops over multiple transitions)
 
 ---
 
@@ -405,7 +408,7 @@ Uses existing uprez job handlers (`nvidia-uprez` / `uprez`):
 - Per-transition overrides via below-strip panel
 - Generate All / individual Generate
 - Inline gap status (6 states)
-- Regeneration with new seed
+- Regeneration (re-submit, worker generates new seed)
 - Socket.IO progress tracking
 - Client-side video preview (inline + lightbox)
 - Uprez (per-transition and Uprez All)
