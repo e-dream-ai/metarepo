@@ -28,7 +28,8 @@
 ### Extended Flow Types
 
 ```typescript
-type VideoModel = "ltx-i2v" | "wan-i2v";
+// VideoModel and LoRAConfig imported from studio.types.ts (already defined there)
+// import type { VideoModel, LoRAConfig } from "@/types/studio.types";
 
 interface FlowTransition {
   fromKeyframeId: string;          // FlowKeyframe.id
@@ -149,7 +150,7 @@ Appears below the keyframe strip. Two modes:
 
 Fields:
 - **Preset** — `<select>` populated from `StudioAction` presets, filtered by current model
-- **Duration** — `<select>` with options: 3s, 5s, 8s, 10s
+- **Duration** — `<select>` with model-dependent options (LTX: 5/10/15/20s, Wan: 5/8/10s, Wan+LoRA: 5/8s). Uses existing `getAllowedDurationsForActions` logic.
 - **Generate All** / **Generate** button (gold accent)
 - **▾ Customize** link to expand
 
@@ -176,7 +177,7 @@ Additional fields when expanded:
 - **LoRA** — `<select>` filtered by selected model
 - **▸ Advanced** — expandable section with steps, guidance scale, CFG (hidden by default)
 
-Selecting a preset fills prompt, duration, LoRA, and model as starting values. User can customize after.
+Selecting a preset fills prompt and LoRAs as starting values (from `StudioAction`). Duration and model are **independent controls** — `StudioAction` does not carry these fields. Presets are filtered by the currently selected model via `PresetPack.model`. User can customize prompt/LoRAs after selecting.
 
 #### Per-transition mode differences
 
@@ -205,7 +206,7 @@ When all transitions are complete, a small inline video player appears below the
 ```
 
 - **Client-side concatenation**: segments played sequentially — on `ended` event, switch `<video>` src to next segment. `MediaSource` API is an option for gapless playback but adds complexity; start with sequential and upgrade if needed
-- **Click to expand**: opens `LightboxOverlay` (existing component) with full-size playback
+- **Click to expand**: opens a `VideoLightbox` overlay (new component, styled similarly to existing `LightboxOverlay` but wrapping a `<video>` element instead of `PresignedImage`)
 - **Partial preview**: if some transitions are complete, preview plays available segments only (with placeholder gaps)
 
 ### 4. Action Buttons
@@ -228,19 +229,22 @@ Buttons use the existing flow design tokens: `bgElevated` background, `border` b
 
 ### Creating a transition dream
 
-Each transition generates one dream via the existing backend API:
+Each transition generates one dream via a two-step API sequence (the creation endpoint does not accept keyframe IDs — they're attached via update):
 
-1. `POST /v1/dream` with:
-   - `prompt`: transition's effective prompt (override or global)
-   - `infinidream_algorithm`: mapped from `VideoModel` ("ltx-i2v" or "wan-i2v")
-   - `startKeyframeId`: from keyframe's `keyframeUuid`
-   - `endKeyframeId`: to keyframe's `keyframeUuid` (if supported by model)
-   - `duration`: transition's effective duration
-   - Model-specific params (LoRAs, steps, guidance) from effective settings
+1. **Create dream** via `useCreateDreamFromPrompt` → `POST /v1/dream`:
+   - `name`: auto-generated from keyframe pair (e.g., "nebula → crystal")
+   - `prompt`: JSON-encoded algorithm params, structured per model:
+     - **LTX I2V**: `{ infinidream_algorithm: "ltx-i2v", prompt, source_dream_uuid, duration, ...loraParams }`
+     - **Wan I2V**: `{ infinidream_algorithm: "wan-i2v", prompt, image, duration, ...loraParams }`
+   - Note: `source_dream_uuid` (LTX) and `image` (Wan) expect a dream/image UUID, not a keyframe UUID. The from-keyframe's `image` URL or associated dream UUID must be resolved. If keyframes don't have an associated dream, the keyframe's `image` field (R2 CDN URL) may work directly for Wan's `image` param — verify with backend.
 
-2. Store `dreamUuid` on the transition, set status to `"queue"`
+2. **Attach keyframes** via `PUT /v1/dream/:uuid`:
+   - `startKeyframe`: from keyframe's `keyframeUuid`
+   - `endKeyframe`: to keyframe's `keyframeUuid`
 
-3. Join Socket.IO room for progress tracking
+3. Store `dreamUuid` on the transition, set status to `"queue"`
+
+4. Join Socket.IO room for progress tracking
 
 ### "Generate All" logic
 
@@ -306,16 +310,16 @@ Uses existing uprez job handlers (`nvidia-uprez` / `uprez`):
 
 | File | Change |
 |------|--------|
-| `stores/flow.store.ts` | Add transitions, global settings, Phase 1 actions. Bump persist version to 2 with migration from v1. |
+| `stores/flow.store.ts` | Add transitions, global settings, Phase 1 actions. Bump persist version to 2 with v1→v2 migration: `{ transitions: [], globalPresetId: "", globalPrompt: "", globalDuration: 5, globalModel: "ltx-i2v", selectedTransitionIndex: null, settingsExpanded: false }` |
 | `stores/flow.store.test.ts` | Add transition derivation and override tests |
-| `types/flow.types.ts` | Add FlowTransition, TransitionStatus, VideoModel |
+| `types/flow.types.ts` | Add FlowTransition, TransitionStatus (import VideoModel, LoRAConfig from studio.types) |
 | `constants/flow-theme.constants.ts` | No changes needed (status colors already defined) |
 | `components/.../flow-builder.tsx` | Render settings panel, preview, action bar |
 | `components/.../keyframe-strip.tsx` | Use TransitionGap instead of plain gap |
 
 ### Existing components reused
 
-- `LightboxOverlay` from `images-tab.styled.tsx` — for expanded video preview
+- `LightboxOverlay` styling pattern from `images-tab.styled.tsx` — referenced for consistent overlay design (but new `VideoLightbox` created for video)
 - `StudioAction` presets — for preset picker population
 - Socket.IO progress pattern from `useStudioJobProgress` — adapted for flow transitions
 - Dream creation hooks — for submitting generation jobs
@@ -330,7 +334,7 @@ Uses existing uprez job handlers (`nvidia-uprez` / `uprez`):
 | Socket.IO `/remote-control` | Real-time progress per transition |
 | Uprez job handlers | Post-render upscaling (nvidia-uprez, uprez) |
 | StudioAction presets | Populate preset picker, pre-fill settings |
-| LightboxOverlay | Expanded video preview |
+| LightboxOverlay pattern | Styling reference for VideoLightbox overlay |
 | Keyframe CRUD API | Start/end keyframe references on dreams |
 
 ---
