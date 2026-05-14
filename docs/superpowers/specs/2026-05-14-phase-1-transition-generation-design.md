@@ -68,7 +68,9 @@ interface FlowStoreState {
   globalPresetId: string;          // StudioAction ID (default: "")
   globalPrompt: string;            // default: ""
   globalDuration: number;          // default: 5
-  globalModel: VideoModel;         // default: "ltx-i2v"
+  globalModel: VideoModel;         // default: "wan-i2v" (more presets available than ltx-i2v)
+  globalNumInferenceSteps: number; // default: 30 (matches batch mode default)
+  globalGuidance: number;          // default: 5.0 (matches batch mode default)
 
   // Phase 1 — transitions (derived from keyframe pairs)
   transitions: FlowTransition[];
@@ -82,6 +84,8 @@ interface FlowStoreState {
   setGlobalPrompt: (prompt: string) => void;
   setGlobalDuration: (duration: number) => void;
   setGlobalModel: (model: VideoModel) => void;
+  setGlobalNumInferenceSteps: (steps: number) => void;
+  setGlobalGuidance: (guidance: number) => void;
   setTransitionOverride: (index: number, overrides: Partial<FlowTransition>) => void;
   clearTransitionOverride: (index: number) => void;
   selectTransition: (index: number | null) => void;
@@ -103,6 +107,14 @@ Transitions are derived from adjacent keyframe pairs. When keyframes change (add
 4. If no match: create new transition with `status: "idle"` and no overrides
 
 When loop is enabled, the loop keyframe pair (last real keyframe → first keyframe) generates a transition like any other.
+
+### Persistence & Hydration
+
+Transitions are persisted in localStorage (they carry `dreamUuid`, overrides, and status that must survive page refresh). However, stale state must be handled on reload:
+
+- **`onRehydrateStorage` callback**: after store hydration, call `recomputeTransitions()` to reconcile with current keyframes
+- **Stale status reconciliation**: any transition with `status: "processing"` or `status: "queue"` on reload gets reset to `status: "failed"` (the Socket.IO connection was lost). The user can retry via "Regenerate".
+- **Alternative**: instead of resetting to "failed", re-subscribe to Socket.IO rooms for any in-flight `dreamUuid`s and poll their current status. More complex but recovers gracefully if the job actually completed while the tab was closed. **Recommended for v1: reset to "failed"** — simpler, and the user can regenerate.
 
 ---
 
@@ -198,7 +210,11 @@ The settings panel fields are reactive to each other. The existing `buildVideoAl
    - If preset has LoRAs (Wan camera presets) → duration clamps to 5/8s only (via `getAllowedDurationsForActions`)
    - If current duration is no longer valid → snap to closest valid duration
 
-3. **Duration changes** → no cascading effects (duration doesn't affect other fields)
+3. **No preset selected** (user typed custom prompt) →
+   - Duration uses model defaults via `getAllowedDurationsForActions([], model)` — returns full range for the model
+   - No LoRAs attached (prompt-only generation)
+
+4. **Duration changes** → no cascading effects (duration doesn't affect other fields)
 
 **Algorithm dispatch (invisible to user):**
 
@@ -265,12 +281,15 @@ Buttons use the existing flow design tokens: `bgElevated` background, `border` b
 
 Each transition generates one dream via a two-step API sequence (the creation endpoint does not accept keyframe IDs — they're attached via update):
 
-1. **Build payload** via `buildVideoAlgoParams(model, action, imageUuid, duration)`:
+1. **Build payload** via `buildVideoAlgoParams({ model, action, imageUuid, imageSize, duration, numInferenceSteps, guidance })`:
+   - Full signature requires: `model`, `action` (prompt + LoRAs), `imageUuid`, `imageSize`, `duration`, `numInferenceSteps`, `guidance`
+   - `imageSize`: pass `undefined` — Wan defaults to `"1280*720"` on the worker, LTX ignores it. Alternatively, resolve from keyframe image dimensions if available.
+   - `numInferenceSteps` and `guidance`: from global or per-transition override settings (defaults: 30, 5.0). Only used by Wan models; LTX ignores them (worker controls steps internally).
    - This existing function handles all model-specific dispatch:
-     - Wan without LoRAs → `{ infinidream_algorithm: "wan-i2v", prompt, image, duration, ... }`
+     - Wan without LoRAs → `{ infinidream_algorithm: "wan-i2v", prompt, image, duration, num_inference_steps, guidance, ... }`
      - Wan with LoRAs → `{ infinidream_algorithm: "wan-i2v-lora", prompt, image, duration, high_noise_loras, low_noise_loras, ... }`
      - LTX → `{ infinidream_algorithm: "ltx-i2v", prompt, source_dream_uuid, duration, high_noise_loras, ... }`
-   - `imageUuid`: pass the from-keyframe's image reference. The keyframe's `image` field is an R2 CDN URL; the worker's `resolveImageFromDreamUuid` can resolve URLs — verify this works for keyframe image URLs (not just dream UUIDs).
+   - **Image reference resolution**: `imageUuid` must be a dream UUID or a value the worker can resolve. `FlowKeyframe.imageUrl` is an R2 CDN URL, not a UUID. The worker's `resolveImageFromDreamUuid` handles URLs for Wan (`image` field), but LTX's `source_dream_uuid` field expects a UUID. **Implementation must resolve this**: either (a) verify the worker accepts URLs in `source_dream_uuid`, (b) use the keyframe's backend UUID and let the worker resolve the image, or (c) add a `keyframeImageUuid` field to `FlowKeyframe` that stores the image's UUID separately from the display URL. Option (b) is preferred — pass `keyframeUuid` and add a backend endpoint or worker logic to resolve keyframe → image.
 
 2. **Create dream** via `useCreateDreamFromPrompt` → `POST /v1/dream`:
    - `name`: auto-generated from keyframe pair (e.g., "nebula → crystal")
@@ -296,7 +315,7 @@ for each transition:
 
 ### Progress tracking
 
-Reuse the existing `useStudioJobProgress` pattern:
+New hook (`useFlowJobProgress`) modeled after `useStudioJobProgress` — a full reimplementation targeting `useFlowStore`, not a light wrapper. The batch hook hard-codes `useStudioStore` calls throughout:
 - Join `dream_room` for each pending transition's `dreamUuid`
 - Listen to `job:progress` Socket.IO events
 - Update `progress` (0-100) and `status` on the flow store
@@ -348,7 +367,7 @@ Uses existing uprez job handlers (`nvidia-uprez` / `uprez`):
 
 | File | Change |
 |------|--------|
-| `stores/flow.store.ts` | Add transitions, global settings, Phase 1 actions. Bump persist version to 2 with v1→v2 migration: `{ transitions: [], globalPresetId: "", globalPrompt: "", globalDuration: 5, globalModel: "ltx-i2v", selectedTransitionIndex: null, settingsExpanded: false }` |
+| `stores/flow.store.ts` | Add transitions, global settings, Phase 1 actions. Bump persist version to 2 with v1→v2 migration: `{ transitions: [], globalPresetId: "", globalPrompt: "", globalDuration: 5, globalModel: "wan-i2v", globalNumInferenceSteps: 30, globalGuidance: 5.0, selectedTransitionIndex: null, settingsExpanded: false }`. Add `onRehydrateStorage` to reconcile stale transitions. |
 | `stores/flow.store.test.ts` | Add transition derivation and override tests |
 | `types/flow.types.ts` | Add FlowTransition, TransitionStatus (import VideoModel, LoRAConfig from studio.types) |
 | `constants/flow-theme.constants.ts` | No changes needed (status colors already defined) |
@@ -361,7 +380,7 @@ Uses existing uprez job handlers (`nvidia-uprez` / `uprez`):
 - `StudioAction` presets + `PresetPack` model scoping — for preset picker population
 - `buildVideoAlgoParams` — single function for all model-specific payload construction + algorithm dispatch
 - `getAllowedDurationsForActions` — reactive duration constraint logic
-- Socket.IO progress pattern from `useStudioJobProgress` — adapted for flow transitions
+- Socket.IO progress pattern from `useStudioJobProgress` — reimplemented as `useFlowJobProgress` targeting flow store
 - Dream creation hooks — for submitting generation jobs
 
 ---
