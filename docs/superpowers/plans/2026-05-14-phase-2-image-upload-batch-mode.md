@@ -391,7 +391,10 @@ const fileInputRef = useRef<HTMLInputElement>(null);
 const handleUploadFiles = useCallback(
   async (files: File[]) => {
     for (const file of files) {
-      // Add placeholder with local blob URL for immediate feedback
+      // Add placeholder with local blob URL for immediate feedback.
+      // Keep the placeholder UUID stable — never swap it. The rendering
+      // and batch submit logic branch on img.url.startsWith("http") to
+      // distinguish uploaded images from generated ones.
       const placeholderUuid = uuidv4();
       const blobUrl = URL.createObjectURL(file);
       addImage({
@@ -405,7 +408,6 @@ const handleUploadFiles = useCallback(
       try {
         const result = await uploadKeyframeImage(file);
         updateImage(placeholderUuid, {
-          uuid: result.keyframeUuid,
           url: result.imageUrl,
           status: "processed",
           name: result.name,
@@ -679,8 +681,10 @@ export const StudioContainer = styled.div<{ $dragOver?: boolean }>`
 In `studio.page.tsx`, add the upload handler:
 
 ```typescript
-// Add imports
-import { useCallback } from "react";
+// Update the existing React import to add useCallback:
+import React, { lazy, Suspense, useCallback } from "react";
+
+// Add new imports:
 import { v4 as uuidv4 } from "uuid";
 import { useFileDropUpload } from "./hooks/useFileDropUpload";
 import { uploadKeyframeImage } from "./utils/upload-keyframe-image";
@@ -697,6 +701,7 @@ const handleStudioDrop = useCallback(
 
     for (const file of files) {
       if (currentMode === "batch") {
+        // Same pattern as images-tab: stable placeholder UUID, no swap
         const placeholderUuid = uuidv4();
         const blobUrl = URL.createObjectURL(file);
         addImage({
@@ -710,7 +715,6 @@ const handleStudioDrop = useCallback(
         try {
           const result = await uploadKeyframeImage(file);
           updateImage(placeholderUuid, {
-            uuid: result.keyframeUuid,
             url: result.imageUrl,
             status: "processed",
             name: result.name,
