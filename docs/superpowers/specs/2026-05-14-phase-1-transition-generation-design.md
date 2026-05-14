@@ -36,7 +36,7 @@ interface FlowTransition {
   toKeyframeId: string;            // FlowKeyframe.id
 
   // Per-transition overrides (undefined = use global)
-  presetOverride?: string;         // StudioAction preset ID
+  presetOverride?: string;         // PresetPack name (e.g., "Wan Camera", "Organic")
   promptOverride?: string;
   durationOverride?: number;       // seconds
   modelOverride?: VideoModel;
@@ -47,9 +47,9 @@ interface FlowTransition {
   status: TransitionStatus;
   progress?: number;               // 0-100 during processing
 
-  // Uprez state
+  // Uprez state (undefined = not started/not eligible, never "idle")
   uprezDreamUuid?: string;
-  uprezStatus?: TransitionStatus;
+  uprezStatus?: "queue" | "processing" | "processed" | "failed";
   uprezProgress?: number;
 }
 
@@ -65,7 +65,7 @@ interface FlowStoreState {
   loop: boolean;
 
   // Phase 1 — global transition settings
-  globalPresetId: string;          // StudioAction ID (default: "")
+  globalPresetId: string;          // PresetPack name (default: ""). Resolved to a single StudioAction for generation (see Preset Resolution below).
   globalPrompt: string;            // default: ""
   globalDuration: number;          // default: 5
   globalModel: VideoModel;         // default: "wan-i2v" (more presets available than ltx-i2v)
@@ -161,7 +161,7 @@ Appears below the keyframe strip. Two modes:
 ```
 
 Fields:
-- **Preset** — `<select>` populated from `StudioAction` presets, filtered by current model
+- **Preset** — `<select>` populated from `PresetPack` names, filtered by current model (via `PresetPack.model`). Each option is a `PresetPack` (e.g., "Wan Camera", "Organic"), not an individual `StudioAction`.
 - **Duration** — `<select>` with model-dependent options (LTX: 5/10/15/20s, Wan: 5/8/10s, Wan+LoRA: 5/8s). Uses existing `getAllowedDurationsForActions` logic.
 - **Generate All** / **Generate** button (gold accent)
 - **▾ Customize** link to expand
@@ -191,6 +191,16 @@ Additional fields when expanded:
 
 Selecting a preset fills prompt and LoRAs as starting values (from `StudioAction`). Duration and model are **independent controls** — `StudioAction` does not carry these fields. Presets are filtered by the currently selected model via `PresetPack.model`. User can customize prompt/LoRAs after selecting.
 
+**Preset resolution (PresetPack → StudioAction):**
+
+In batch mode, selecting a `PresetPack` loads ALL its actions via `createActionsFromPreset(preset)`. In flow mode, each transition needs a **single** `StudioAction`. Resolution:
+1. Find the `PresetPack` by name from `ACTION_PRESETS`
+2. Call `createActionsFromPreset(pack)` to get the list of `StudioAction` entries
+3. Use the **first action** in the pack (index 0) — this is the pack's primary/default action
+4. The user's prompt override (if any) replaces the action's prompt; LoRAs are preserved from the action
+
+This gives each transition a concrete `StudioAction` to pass to `buildVideoAlgoParams`. If no preset is selected (`globalPresetId === ""`), construct a bare action: `{ prompt: globalPrompt, highNoiseLoras: [], lowNoiseLoras: [] }`.
+
 #### Model / Preset / Duration Reactivity
 
 The settings panel fields are reactive to each other. The existing `buildVideoAlgoParams` and `getAllowedDurationsForActions` functions are the source of truth — the panel calls them, not reimplements them.
@@ -207,11 +217,11 @@ The settings panel fields are reactive to each other. The existing `buildVideoAl
 2. **Preset changes** →
    - Prompt textarea fills from `StudioAction.prompt`
    - LoRAs fill from `StudioAction.highNoiseLoras` / `lowNoiseLoras`
-   - If preset has LoRAs (Wan camera presets) → duration clamps to 5/8s only (via `getAllowedDurationsForActions`)
+   - If preset has LoRAs (Wan camera presets) → duration clamps to 5/8s only (via `getAllowedDurationsForActions([resolvedAction], model)` — single-element array, unlike batch mode which passes all actions)
    - If current duration is no longer valid → snap to closest valid duration
 
 3. **No preset selected** (user typed custom prompt) →
-   - Duration uses model defaults via `getAllowedDurationsForActions([], model)` — returns full range for the model
+   - Duration uses model defaults via `getAllowedDurationsForActions([], model)` — empty array returns full range for the model
    - No LoRAs attached (prompt-only generation)
 
 4. **Duration changes** → no cascading effects (duration doesn't affect other fields)
@@ -270,7 +280,7 @@ Appear below the strip when any transition has results:
 
 - **Preview All** — opens inline preview (or lightbox if already playing)
 - **Uprez All** — dropdown: Nvidia Super Resolution / Current Uprez. Upscales all completed transitions
-- **Save to Playlist** — saves individual segments to a playlist (preserves atomized keyframes)
+- **Save to Playlist** — Phase 1 stub: button is present but shows a "Coming soon" toast on click. Full implementation (playlist picker, API calls, keyframe preservation) deferred to Phase 2.
 
 Buttons use the existing flow design tokens: `bgElevated` background, `border` border, `textDim` text. "Uprez All" uses accent styling (`accentDim` background, `accent` text).
 
@@ -284,7 +294,7 @@ Each transition generates one dream via a two-step API sequence (the creation en
 
 1. **Build payload** via `buildVideoAlgoParams({ model, action, imageUuid, imageSize, duration, numInferenceSteps, guidance })`:
    - Full signature requires: `model`, `action` (prompt + LoRAs), `imageUuid`, `imageSize`, `duration`, `numInferenceSteps`, `guidance`
-   - `imageSize`: pass `undefined` — `buildVideoAlgoParams` applies `"1280*720"` as default for plain `wan-i2v` in the frontend; the field is omitted entirely for `wan-i2v-lora` and LTX. Alternatively, resolve from keyframe image dimensions if available.
+   - `imageSize`: pass `undefined`. `buildVideoAlgoParams` applies `"1280*720"` as default for plain `wan-i2v` in the frontend; the field is omitted entirely for `wan-i2v-lora` and LTX.
    - `numInferenceSteps` and `guidance`: from global or per-transition override settings (defaults: 30, 5.0). Only used by Wan models; LTX ignores them (worker controls steps internally).
    - This existing function handles all model-specific dispatch:
      - Wan without LoRAs → `{ infinidream_algorithm: "wan-i2v", prompt, image, duration, num_inference_steps, guidance, ... }`
@@ -307,7 +317,9 @@ Each transition generates one dream via a two-step API sequence (the creation en
 ### "Generate All" logic
 
 ```
-if no transitions have status === "idle" or "failed" → button is disabled (all done or in-flight)
+// Disable when nothing is actionable:
+// disabled = transitions.every(t => ["processed", "queue", "processing"].includes(t.status))
+// i.e., enabled when at least one transition is "idle" or "failed"
 
 for each transition:
   if status === "processed" → skip (already done)
@@ -363,7 +375,7 @@ Uses existing uprez job handlers (`nvidia-uprez` / `uprez`):
 | `components/.../flow-preview.styled.tsx` | Preview styles |
 | `components/.../flow-action-bar.tsx` | Preview All / Uprez All / Save buttons |
 | `components/.../flow-action-bar.styled.tsx` | Action bar styles |
-| `hooks/useFlowJobProgress.ts` | Socket.IO progress tracking for flow transitions |
+| `hooks/useFlowJobProgress.ts` | Socket.IO progress tracking for flow transitions. Mounted in `flow-builder.tsx` (not in `StudioPage` — separate from batch mode's `useStudioJobProgress`). |
 | `hooks/useFlowGeneration.ts` | Dream creation logic for transitions (uses `axiosClient` directly, not mutation hooks) |
 
 ### Modified files
@@ -412,7 +424,7 @@ Uses existing uprez job handlers (`nvidia-uprez` / `uprez`):
 - Socket.IO progress tracking
 - Client-side video preview (inline + lightbox)
 - Uprez (per-transition and Uprez All)
-- Save to Playlist
+- Save to Playlist (stub — button present, full implementation in Phase 2)
 
 ### Out of scope (later phases)
 - Inline image generation for keyframes (Phase 1 stub remains)
