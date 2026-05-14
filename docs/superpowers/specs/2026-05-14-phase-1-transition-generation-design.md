@@ -36,7 +36,7 @@ interface FlowTransition {
   toKeyframeId: string;            // FlowKeyframe.id
 
   // Per-transition overrides (undefined = use global)
-  presetOverride?: string;         // PresetPack name (e.g., "Wan Camera", "Organic")
+  presetOverride?: string;         // PresetPack name (e.g., "Camera Basics", "Organic")
   promptOverride?: string;
   durationOverride?: number;       // seconds
   modelOverride?: VideoModel;
@@ -161,7 +161,7 @@ Appears below the keyframe strip. Two modes:
 ```
 
 Fields:
-- **Preset** — `<select>` populated from `PresetPack` names, filtered by current model (via `PresetPack.model`). Each option is a `PresetPack` (e.g., "Wan Camera", "Organic"), not an individual `StudioAction`.
+- **Preset** — `<select>` populated from `PresetPack` names, filtered by current model (via `PresetPack.model`). Each option is a `PresetPack` (e.g., "Camera Basics", "Organic"), not an individual `StudioAction`.
 - **Duration** — `<select>` with model-dependent options (LTX: 5/10/15/20s, Wan: 5/8/10s, Wan+LoRA: 5/8s). Uses existing `getAllowedDurationsForActions` logic.
 - **Generate All** / **Generate** button (gold accent)
 - **▾ Customize** link to expand
@@ -208,17 +208,17 @@ The settings panel fields are reactive to each other. The existing `buildVideoAl
 **Cascade rules:**
 
 1. **Model changes** →
-   - Preset dropdown re-filters to `PresetPack`s matching the new model (via `PresetPack.model`)
+   - Preset dropdown re-filters to `PresetPack`s matching the new model: include packs where `pack.model === selectedModel || pack.model === "all"` (Organic and Abstract packs have `model: "all"` and appear for any model)
    - Duration options update (LTX: 5/10/15/20s, Wan: 5/8/10s)
    - LoRA dropdown re-filters to model-appropriate LoRAs
    - If current preset is invalid for new model → clear preset selection
-   - If current duration is invalid for new model → snap to closest valid duration
+   - If current duration is invalid for new model → snap via `clampDurationToAllowed(duration, allowedDurations)` from `duration-options.ts`
 
 2. **Preset changes** →
    - Prompt textarea fills from `StudioAction.prompt`
    - LoRAs fill from `StudioAction.highNoiseLoras` / `lowNoiseLoras`
    - If preset has LoRAs (Wan camera presets) → duration clamps to 5/8s only (via `getAllowedDurationsForActions([resolvedAction], model)` — single-element array, unlike batch mode which passes all actions)
-   - If current duration is no longer valid → snap to closest valid duration
+   - If current duration is no longer valid → snap via `clampDurationToAllowed(duration, allowedDurations)` from `duration-options.ts`
 
 3. **No preset selected** (user typed custom prompt) →
    - Duration uses model defaults via `getAllowedDurationsForActions([], model)` — empty array returns full range for the model
