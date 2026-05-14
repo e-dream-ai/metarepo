@@ -93,6 +93,7 @@ interface FlowStoreState {
   updateTransitionStatus: (index: number, status: TransitionStatus, progress?: number) => void;
   setTransitionDream: (index: number, dreamUuid: string) => void;
   setTransitionUprez: (index: number, uprezDreamUuid: string) => void;
+  updateTransitionUprezStatus: (index: number, status: "queue" | "processing" | "processed" | "failed", progress?: number) => void;
   recomputeTransitions: () => void;  // called after keyframe add/remove/reorder
 }
 ```
@@ -106,7 +107,7 @@ Transitions are derived from adjacent keyframe pairs. When keyframes change (add
 3. If match found: preserve overrides, dreamUuid, status (carry forward existing state)
 4. If no match: create new transition with `status: "idle"` and no overrides
 
-When loop is enabled, the loop transition pair uses `fromKeyframeId: keyframes[last].id` and `toKeyframeId: keyframes[0].id` — NOT `"__loop__"`. The `__loop__` synthetic keyframe only exists for visual rendering in `keyframesWithLoop()`; transitions must reference real keyframe IDs so they can be matched on reload and so `keyframeUuid` can be resolved for generation. `recomputeTransitions()` must use `keyframesWithLoop()` to discover pairs but store real IDs on the resulting transitions.
+When loop is enabled, the loop transition pair uses `fromKeyframeId: keyframes[last].id` and `toKeyframeId: keyframes[0].id` — NOT `"__loop__"`. The `__loop__` synthetic keyframe only exists for visual rendering in `keyframesWithLoop()`; transitions must reference real keyframe IDs so they can be matched on reload and so `keyframeUuid` can be resolved for generation. `recomputeTransitions()` must call `get().keyframesWithLoop()` inside the store action (via Zustand's `get()`) to discover pairs — do NOT call it through a selector, which would create a new array reference on every render (this anti-pattern already exists in `keyframe-strip.tsx` and should not be replicated).
 
 ### Persistence & Hydration
 
@@ -231,7 +232,7 @@ The settings panel fields are reactive to each other. The existing `buildVideoAl
 The user never sees `wan-i2v-lora` as a model option. When generating, `buildVideoAlgoParams` checks if the resolved action has LoRAs:
 - If yes → dispatches as `wan-i2v-lora` (with `high_noise_loras` / `low_noise_loras` in payload)
 - If no → dispatches as `wan-i2v` (prompt-only payload)
-- LTX always includes a LoRA (defaults to "static camera" if none specified)
+- LTX presets always include a LoRA (e.g., "static camera"); if no preset is selected for LTX, no LoRA is attached (bare prompt-only generation — `buildVideoAlgoParams` does not inject a default)
 
 **Source image field (model-dependent):**
 - Wan models: `image` field (accepts keyframe image URL or UUID)
