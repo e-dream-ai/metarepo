@@ -23,22 +23,23 @@ Frontend (React) ──→ Backend (Node/Express) ──→ Worker (BullMQ)
 
 ## Repositories
 
-| Repo | Stack | Purpose |
-|------|-------|---------|
-| `backend` | TypeScript/Express/TypeORM/BullMQ | Main API, auth (WorkOS), Socket.IO, job orchestration |
-| `frontend` | React/Vite/TypeScript/Zustand | Web UI for dream creation, playback, playlists |
-| `video` | Python/FFmpeg (RunPod container) | Video processing: thumbnails, filmstrips, transcoding |
-| `worker` | TypeScript/Express/BullMQ | GPU job coordinator, RunPod submission, Bull Dashboard |
-| `gpu-container-comfy` | Python/Docker/ComfyUI | Serverless GPU container on RunPod |
-| `python-api` | Python | edream_sdk - Python client for backend API |
-| `engines` | Python | Batch processing scripts (wan-i2v, uprez, qwen) |
-| `electric-sheep-engine` | Python | Legacy Electric Sheep playlist sync |
-| `landing-page` | Next.js/React/Tailwind/Biome | Static website (infinidream.ai) |
-| `client` | C++ | Native macOS desktop app/screensaver |
+| Repo                    | Stack                             | Purpose                                                |
+| ----------------------- | --------------------------------- | ------------------------------------------------------ |
+| `backend`               | TypeScript/Express/TypeORM/BullMQ | Main API, auth (WorkOS), Socket.IO, job orchestration  |
+| `frontend`              | React/Vite/TypeScript/Zustand     | Web UI for dream creation, playback, playlists         |
+| `video`                 | Python/FFmpeg (RunPod container)  | Video processing: thumbnails, filmstrips, transcoding  |
+| `worker`                | TypeScript/Express/BullMQ         | GPU job coordinator, RunPod submission, Bull Dashboard |
+| `gpu-container-comfy`   | Python/Docker/ComfyUI             | Serverless GPU container on RunPod                     |
+| `python-api`            | Python                            | edream_sdk - Python client for backend API             |
+| `engines`               | Python                            | Batch processing scripts (wan-i2v, uprez, qwen)        |
+| `electric-sheep-engine` | Python                            | Legacy Electric Sheep playlist sync                    |
+| `landing-page`          | Next.js/React/Tailwind/Biome      | Static website (infinidream.ai)                        |
+| `client`                | C++                               | Native macOS desktop app/screensaver                   |
 
 ## Commands by Repository
 
 ### backend
+
 ```bash
 pnpm run dev              # Development with hot reload
 pnpm run build            # Compile TypeScript
@@ -50,6 +51,7 @@ pnpm run migration:generate <name>  # Generate migration
 ```
 
 ### frontend
+
 ```bash
 pnpm run dev              # Vite dev server (localhost:5173)
 pnpm run build            # Production build
@@ -58,14 +60,17 @@ pnpm run type-check       # TypeScript validation
 ```
 
 ### worker
+
 ```bash
 npm run dev               # Watch mode with nodemon
 npm run build             # Compile TypeScript
 node dist/prompt.js prompt/deforum-fish.json  # Submit job via CLI
 ```
+
 Bull Dashboard: http://localhost:3000/admin (user: admin)
 
 ### gpu-container-comfy
+
 ```bash
 docker build -t comfy:dev-base --target base --platform linux/amd64 .
 docker-compose up         # Local dev (ComfyUI: 8188, API: 8000)
@@ -73,6 +78,7 @@ python -m unittest discover  # Run tests
 ```
 
 ### engines
+
 ```bash
 pip install -r requirements.txt
 python3 scripts/run_wan_i2v_batch.py     # Image-to-video batch
@@ -81,6 +87,7 @@ python3 scripts/run_qwen_image_batch.py  # Image generation batch
 ```
 
 ### landing-page
+
 ```bash
 pnpm run dev              # Next.js dev server with Turbopack
 pnpm run build            # Static export to out/
@@ -88,6 +95,7 @@ pnpm run biome:check      # Lint + format (Biome)
 ```
 
 ### client (macOS)
+
 ```bash
 brew install git-lfs && git lfs install
 open client_generic/MacBuild/e-dream.xcodeproj
@@ -146,19 +154,20 @@ During rendering, progress streams via Socket.IO `/remote-control` namespace:
 job:progress event → { status, progress (0-100), countdown_ms, preview_frame (base64 JPEG) }
 ```
 
-| Component | Location |
-|-----------|----------|
+| Component             | Location                                                            |
+| --------------------- | ------------------------------------------------------------------- |
 | Worker captures frame | `worker/src/services/status-handler.service.ts:storePreviewFrame()` |
-| Redis storage | `job:preview:{dreamUUID}` (3hr TTL) |
-| Backend endpoint | `GET /v1/dream/{uuid}/preview` |
-| Frontend hook | `frontend/src/api/dream/mutation/useGetDreamPreview.ts` |
-| Progress broadcaster | `backend/src/services/job-progress.service.ts` |
+| Redis storage         | `job:preview:{dreamUUID}` (3hr TTL)                                 |
+| Backend endpoint      | `GET /v1/dream/{uuid}/preview`                                      |
+| Frontend hook         | `frontend/src/api/dream/mutation/useGetDreamPreview.ts`             |
+| Progress broadcaster  | `backend/src/services/job-progress.service.ts`                      |
 
 Preview works for Deforum, Wan, Qwen, Uprez. Not yet implemented for AnimateDiff.
 
 ## RunPod Endpoints
 
 Worker submits to different RunPod endpoints based on job type:
+
 - `RUNPOD_DEFORUM_ENDPOINT_ID` - Deforum animation
 - `RUNPOD_ANIMATEDIFF_ENDPOINT_ID` - AnimateDiff video
 - `RUNPOD_UPREZ_ENDPOINT_ID` - Video upscaling
@@ -166,14 +175,14 @@ Worker submits to different RunPod endpoints based on job type:
 
 ## Deployment
 
-| Service | Platform | Trigger |
-|---------|----------|---------|
-| backend | Heroku | Push to `stage`/`main` |
-| frontend | Cloudflare | Push to `stage`/`main` |
-| video | RunPod | Docker Hub via GitHub Actions |
-| worker | Heroku | Manual |
-| landing-page | Cloudflare | Static export |
-| gpu-container-comfy | RunPod | Docker Hub via GitHub Actions |
+| Service             | Platform   | Trigger                       |
+| ------------------- | ---------- | ----------------------------- |
+| backend             | Heroku     | Push to `stage`/`main`        |
+| frontend            | Cloudflare | Push to `stage`/`main`        |
+| video               | RunPod     | Docker Hub via GitHub Actions |
+| worker              | Heroku     | Manual                        |
+| landing-page        | Cloudflare | Static export                 |
+| gpu-container-comfy | RunPod     | Docker Hub via GitHub Actions |
 
 ## Shared SDK (edream_sdk)
 
@@ -191,6 +200,7 @@ cd python-api && pip install -r requirements.txt
 ```
 
 ### Basic Usage
+
 ```python
 from edream_sdk.client import create_edream_client
 import json
@@ -217,17 +227,19 @@ client.add_item_to_playlist(playlist["uuid"], type="dream", item_uuid=dream["uui
 ```
 
 ### Supported Algorithms
-| Algorithm | `infinidream_algorithm` | Key Params |
-|-----------|------------------------|------------|
-| Qwen Image | `qwen-image` | `prompt`, `size`, `seed` |
-| Wan T2V | `wan-t2v` | `prompt`, `duration`, `size` |
-| Wan I2V | `wan-i2v` | `prompt`, `image`, `duration` |
-| Wan I2V LoRA | `wan-i2v-lora` | `prompt`, `image`, `high_noise_loras`, `low_noise_loras` |
-| Deforum | `deforum` | `0` (prompt), `max_frames`, `width`, `height` |
-| AnimateDiff | `animatediff` | `prompts`, `frame_count`, `steps` |
-| Uprez | `uprez` | `video_uuid`, `upscale_factor`, `interpolation_factor` |
+
+| Algorithm    | `infinidream_algorithm` | Key Params                                               |
+| ------------ | ----------------------- | -------------------------------------------------------- |
+| Qwen Image   | `qwen-image`            | `prompt`, `size`, `seed`                                 |
+| Wan T2V      | `wan-t2v`               | `prompt`, `duration`, `size`                             |
+| Wan I2V      | `wan-i2v`               | `prompt`, `image`, `duration`                            |
+| Wan I2V LoRA | `wan-i2v-lora`          | `prompt`, `image`, `high_noise_loras`, `low_noise_loras` |
+| Deforum      | `deforum`               | `0` (prompt), `max_frames`, `width`, `height`            |
+| AnimateDiff  | `animatediff`           | `prompts`, `frame_count`, `steps`                        |
+| Uprez        | `uprez`                 | `video_uuid`, `upscale_factor`, `interpolation_factor`   |
 
 ### Test Script
+
 ```bash
 cd python-api
 cp .env.example .env  # Add API_KEY from infinidream.ai/my-profile
@@ -244,3 +256,46 @@ python tests/gen.py --algo wan-i2v
 ## Design Documents
 
 - `docs/plans/2026-01-30-visual-creator-workflows-design.md` - Creator workflows, preview system, batch processing
+
+## GPU Container CD Pipeline
+
+Applies to all `gpu-container-*` repos (e.g. `gpu-container-deforum`, `gpu-container-ltx`).
+
+### How it works
+
+1. **GitHub Action** (`.github/workflows/build-and-push.yml`) triggers on push to `main` or manual dispatch.
+2. It builds the Docker image for `linux/amd64`, tags it with `<timestamp>-<short-sha>` and `latest`, and pushes both to **GHCR** (`ghcr.io/e-dream-ai/<repo>:<version>`).
+3. The image is now available at `ghcr.io/e-dream-ai/<repo>:latest` (and the versioned tag).
+
+### Updating the RunPod endpoint (currently manual)
+
+After a new image is pushed to GHCR, the RunPod serverless endpoint must be told to use it:
+
+1. Go to [RunPod Console → Serverless](https://www.runpod.io/console/serverless).
+2. Open the endpoint for this container.
+3. Click **New Release**.
+4. Paste the new GHCR image URL (e.g. `ghcr.io/e-dream-ai/gpu-container-ltx:20260530123456-abc1234`).
+5. Save — RunPod pulls the image and makes it live for new jobs.
+
+### How to automate the RunPod update
+
+RunPod exposes a GraphQL API at `https://api.runpod.io/graphql`. Our endpoints are deployed directly from GHCR (no separate template), so the image is updated via `saveEndpoint` using the endpoint ID.
+
+**Required secrets/variables:**
+
+- `RUNPOD_API_KEY` — repo secret (or shared org-level secret). Get it from RunPod Console → Settings → API Keys.
+- `RUNPOD_<NAME>_ENDPOINT_ID` — repo variable (Settings → Variables). The endpoint ID is visible in the URL when you open an endpoint in the RunPod console.
+
+```yaml
+- name: Update RunPod endpoint image
+  env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      RUNPOD_ENDPOINT_ID: ${{ vars.RUNPOD_LTX_ENDPOINT_ID }}
+      IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+  run: |
+      curl -s -X POST "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\": \"mutation { saveEndpoint(input: { id: \\\"${RUNPOD_ENDPOINT_ID}\\\", imageName: \\\"${IMAGE_TAG}\\\" }) { id imageName } }\"}"
+```
+
+Each GPU container repo needs its own endpoint ID variable. `RUNPOD_API_KEY` can be a shared org-level secret.
