@@ -180,7 +180,7 @@ Worker submits to different RunPod endpoints based on job type:
 | backend             | Heroku     | Push to `stage`/`main`        |
 | frontend            | Cloudflare | Push to `stage`/`main`        |
 | video               | RunPod     | Docker Hub via GitHub Actions |
-| worker              | Heroku     | Manual                        |
+| worker              | Heroku     | Push to `stage`/`main`        |
 | landing-page        | Cloudflare | Static export                 |
 | gpu-container-comfy | RunPod     | Docker Hub via GitHub Actions |
 
