@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phase 1: Transition Generation — Implementation Plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0c0c0e;
+  --bg-card: #161619;
+  --bg-elevated: #1e1e22;
+  --bg-input: #26262b;
+  --border: #2a2a30;
+  --border-hover: #3a3a42;
+  --text: #e8e6e3;
+  --text-dim: #8a8890;
+  --text-muted: #5a5860;
+  --accent: #d4a853;
+  --accent-dim: rgba(212, 168, 83, 0.15);
+  --accent-glow: rgba(212, 168, 83, 0.08);
+  --success: #4ade80;
+  --success-dim: rgba(74, 222, 128, 0.1);
+  --processing: #60a5fa;
+  --processing-dim: rgba(96, 165, 250, 0.18);
+  --queued: #6b7280;
+  --error: #f87171;
+  --error-dim: rgba(248, 113, 113, 0.16);
+  --radius: 12px;
+  --radius-sm: 8px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html {
+  scroll-behavior: smooth;
+  scroll-snap-type: y mandatory;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-weight: 400;
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+/* ── Slide System ── */
+.slide {
+  min-height: 100vh;
+  scroll-snap-align: start;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 60px 80px;
+  position: relative;
+  overflow: hidden;
+}
+
+.slide::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: radial-gradient(ellipse 60% 50% at 50% 0%, var(--accent-glow), transparent);
+  pointer-events: none;
+}
+
+.slide-number {
+  position: absolute;
+  top: 40px; right: 60px;
+  font-family: 'Instrument Serif', serif;
+  font-size: 14px;
+  color: var(--text-muted);
+  letter-spacing: 0.1em;
+}
+
+/* ── Typography ── */
+h1 {
+  font-family: 'Instrument Serif', serif;
+  font-size: 72px; font-weight: 400;
+  line-height: 1.1; letter-spacing: -0.02em;
+  margin-bottom: 24px;
+}
+h1 .accent { color: var(--accent); }
+
+h2 {
+  font-family: 'Instrument Serif', serif;
+  font-size: 48px; font-weight: 400;
+  line-height: 1.2; letter-spacing: -0.01em;
+  margin-bottom: 16px;
+}
+
+h3 {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.12em;
+  color: var(--accent); margin-bottom: 12px;
+}
+
+.subtitle {
+  font-size: 20px; color: var(--text-dim);
+  max-width: 640px; font-weight: 300; line-height: 1.5;
+}
+
+.slide-intro {
+  font-size: 17px; color: var(--text-dim);
+  max-width: 560px; margin-bottom: 48px; font-weight: 300;
+}
+
+/* ── Title slide ── */
+.title-slide { align-items: center; text-align: center; }
+.title-slide h1 { font-size: 80px; }
+.title-slide .subtitle { margin: 0 auto; }
+
+.logo-mark {
+  width: 48px; height: 48px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), #b8872e);
+  margin: 0 auto 32px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Instrument Serif', serif; font-size: 22px; color: var(--bg);
+}
+
+.meta { margin-top: 40px; font-size: 14px; color: var(--text-muted); }
+
+/* ── Cards ── */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px; margin-top: 40px;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px;
+  transition: border-color 0.3s, transform 0.3s;
+}
+.card:hover { border-color: var(--border-hover); transform: translateY(-2px); }
+
+.card-label {
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.15em;
+  color: var(--text-muted); margin-bottom: 8px;
+}
+
+.card-title {
+  font-family: 'Instrument Serif', serif;
+  font-size: 22px; margin-bottom: 10px;
+}
+
+.card-desc { font-size: 14px; color: var(--text-dim); line-height: 1.5; }
+
+.card-status {
+  display: inline-block; margin-top: 14px;
+  font-size: 12px; font-weight: 500;
+  padding: 4px 10px; border-radius: 20px;
+}
+.card-status.foundation { background: var(--accent-dim); color: var(--accent); }
+.card-status.ui { background: var(--processing-dim); color: var(--processing); }
+.card-status.hooks { background: var(--success-dim); color: var(--success); }
+.card-status.integration { background: var(--error-dim); color: var(--error); }
+
+/* ── Architecture diagram ── */
+.arch-container {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 40px;
+  margin-top: 32px;
+  font-family: 'DM Sans', sans-serif;
+}
+
+.arch-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin: 16px 0;
+}
+
+.arch-box {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 20px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: center;
+  min-width: 140px;
+}
+.arch-box.accent {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.arch-box.processing {
+  border-color: var(--processing);
+  background: var(--processing-dim);
+  color: var(--processing);
+}
+.arch-box.success {
+  border-color: var(--success);
+  background: var(--success-dim);
+  color: var(--success);
+}
+
+.arch-arrow {
+  color: var(--text-muted);
+  font-size: 20px;
+}
+.arch-arrow-down {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 20px;
+  margin: 8px 0;
+}
+
+/* ── Flow diagram ── */
+.flow-diagram {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin-top: 32px;
+}
+
+.flow-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.flow-node {
+  padding: 10px 20px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: center;
+}
+.flow-node.idle { background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-dim); }
+.flow-node.queued { background: rgba(107,114,128,0.2); border: 1px solid var(--queued); color: var(--queued); }
+.flow-node.processing { background: var(--processing-dim); border: 1px solid var(--processing); color: var(--processing); }
+.flow-node.processed { background: var(--success-dim); border: 1px solid var(--success); color: var(--success); }
+.flow-node.failed { background: var(--error-dim); border: 1px solid var(--error); color: var(--error); }
+
+.flow-connector {
+  width: 2px; height: 20px;
+  background: var(--border);
+}
+.flow-branch {
+  display: flex;
+  gap: 40px;
+}
+
+/* ── Table ── */
+.styled-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin-top: 24px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.styled-table th {
+  background: var(--bg-elevated);
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--text-muted);
+  padding: 14px 20px; text-align: left;
+}
+.styled-table td {
+  padding: 12px 20px;
+  font-size: 14px;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+}
+.styled-table tr:hover td { background: var(--bg-elevated); }
+
+/* ── Mockup ── */
+.mockup-container {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px; overflow: hidden;
+  margin-top: 32px;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.4);
+}
+.mockup-titlebar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 14px 20px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+.mockup-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--border); }
+.mockup-dot:nth-child(1) { background: #ff5f57; }
+.mockup-dot:nth-child(2) { background: #febc2e; }
+.mockup-dot:nth-child(3) { background: #28c840; }
+.mockup-body { padding: 28px; }
+
+/* Keyframe strip mockup */
+.strip-mockup {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+.kf-mock {
+  flex-shrink: 0;
+  width: 120px; height: 80px;
+  border-radius: var(--radius-sm);
+  border: 2px solid var(--border);
+  background: linear-gradient(135deg, #1a1520, #1d1825);
+  display: flex; align-items: center; justify-content: center;
+  flex-direction: column; gap: 4px;
+}
+.kf-mock-label {
+  font-size: 10px; color: var(--text-muted);
+  font-weight: 500;
+}
+
+.gap-mock {
+  flex-shrink: 0;
+  width: 80px;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 4px;
+}
+.gap-line {
+  width: 32px;
+  border-top: 2px dashed var(--border);
+}
+.gap-line.configured {
+  border-color: var(--accent);
+}
+.gap-line.processing {
+  border-color: var(--processing);
+}
+.gap-line.done {
+  border-color: var(--success);
+}
+.gap-status {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.gap-status.idle { color: var(--text-muted); }
+.gap-status.configured { color: var(--accent); }
+.gap-status.queued { color: var(--queued); }
+.gap-status.processing { color: var(--processing); }
+.gap-status.done { color: var(--success); }
+.gap-status.failed { color: var(--error); }
+
+.gap-progress {
+  width: 40px; height: 2px;
+  background: var(--bg-input);
+  border-radius: 1px;
+  overflow: hidden;
+}
+.gap-progress-fill {
+  height: 100%;
+  background: var(--processing);
+  border-radius: 1px;
+}
+
+/* Settings panel mockup */
+.settings-mock {
+  margin-top: 20px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+.settings-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 16px;
+}
+.settings-title {
+  font-family: 'Instrument Serif', serif;
+  font-size: 16px;
+}
+.settings-row {
+  display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap;
+}
+.settings-field {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.settings-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+.settings-select {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: 'DM Sans', sans-serif;
+  min-width: 140px;
+}
+.settings-btn {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: 'DM Sans', sans-serif;
+  cursor: pointer;
+}
+
+/* ── Code block ── */
+.code-block {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  margin-top: 24px;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-x: auto;
+  color: var(--text-dim);
+}
+.code-block .keyword { color: var(--processing); }
+.code-block .type { color: var(--accent); }
+.code-block .string { color: var(--success); }
+.code-block .comment { color: var(--text-muted); }
+
+/* ── Lists ── */
+.feature-list {
+  list-style: none;
+  margin-top: 24px;
+}
+.feature-list li {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 15px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.feature-list li:last-child { border-bottom: none; }
+.feature-list .bullet {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+/* ── Decision table ── */
+.decision-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 24px;
+}
+.decision-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+.decision-card .decision-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.decision-card .decision-why {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+/* ── Responsive ── */
+@media (max-width: 900px) {
+  .slide { padding: 40px 32px; }
+  h1 { font-size: 48px; }
+  h2 { font-size: 36px; }
+  .card-grid { grid-template-columns: 1fr; }
+  .decision-grid { grid-template-columns: 1fr; }
+  .arch-row { flex-wrap: wrap; }
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════ SLIDE 1: TITLE ═══════════════════ -->
+<section class="slide title-slide">
+  <div class="logo-mark">e</div>
+  <h1>Phase 1: <span class="accent">Transition Generation</span></h1>
+  <p class="subtitle">Layer video generation between keyframe pairs. Configure, generate, track progress, preview, and uprez &mdash; all inline in the flow builder.</p>
+  <p class="meta">infinidream.ai &middot; Implementation Plan &middot; 2026-06-11</p>
+</section>
+
+<!-- ═══════════════════ SLIDE 2: GOAL ═══════════════════ -->
+<section class="slide">
+  <span class="slide-number">02</span>
+  <h3>Objective</h3>
+  <h2>What Phase 1 delivers</h2>
+  <ul class="feature-list">
+    <li><span class="bullet"></span>Global and per-transition settings (preset, prompt, model, duration)</li>
+    <li><span class="bullet"></span>Generate All &mdash; sequential dream creation with concurrency cap</li>
+    <li><span class="bullet"></span>Real-time progress tracking via Socket.IO with polling fallback</li>
+    <li><span class="bullet"></span>Inline preview player with sequential segment playback</li>
+    <li><span class="bullet"></span>Uprez All with model selection dropdown</li>
+    <li><span class="bullet"></span>Persistent state with hydration reconciliation</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════ SLIDE 3: ARCHITECTURE ═══════════════════ -->
+<section class="slide">
+  <span class="slide-number">03</span>
+  <h3>Architecture</h3>
+  <h2>Component hierarchy</h2>
+  <div class="arch-container">
+    <div class="arch-row">
+      <div class="arch-box accent">FlowBuilder</div>
+    </div>
+    <div class="arch-arrow-down">&darr;</div>
+    <div class="arch-row">
+      <div class="arch-box">KeyframeStrip</div>
+      <div class="arch-box processing">TransitionGapEnhanced</div>
+    </div>
+    <div class="arch-arrow-down">&darr;</div>
+    <div class="arch-row">
+      <div class="arch-box">TransitionSettingsPanel</div>
+    </div>
+    <div class="arch-arrow-down">&darr;</div>
+    <div class="arch-row">
+      <div class="arch-box success">FlowPreview</div>
+      <div class="arch-box">FlowActionBar</div>
+    </div>
+    <div style="margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border);">
+      <div class="arch-row">
+        <div class="arch-box accent">useFlowGeneration</div>
+        <div class="arch-box processing">useFlowJobProgress</div>
+        <div class="arch-box">useFlowStore (Zustand)</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ SLIDE 4: DATA FLOW ═══════════════════ -->
+<section class="slide">
+  <span class="slide-number">04</span>
+  <h3>Data Flow</h3>
+  <h2>Generation pipeline</h2>
+  <div class="arch-container">
+    <div class="arch-row">
+      <div class="arch-box accent">User clicks "Generate All"</div>
+    </div>
+    <div class="arch-arrow-down">&darr;</div>
+    <div class="arch-row">
+      <div class="arch-box">resolveEffectiveSettings()</div>
+      <span class="arch-arrow">&rarr;</span>
+      <div class="arch-box">buildVideoAlgoParams()</div>
+    </div>
+    <div class="arch-arrow-down">&darr;</div>
+    <div class="arch-row">
+      <div class="arch-box processing">POST /v1/dream &rarr; dreamUuid</div>
+    </div>
+    <div class="arch-arrow-down">&darr;</div>
+    <div class="arch-row">
+      <div class="arch-box">store.setTransitionDream(i, uuid)</div>
+      <span class="arch-arrow">&rarr;</span>
+      <div class="arch-box processing">Socket.IO join room</div>
+    </div>
+    <div class="arch-arrow-down">&darr;</div>
+    <div class="arch-row">
+      <div class="arch-box success">job:progress &rarr; updateTransitionStatus()</div>
+    </div>
+    <div class="arch-arrow-down">&darr;</div>
+    <div class="arch-row">
+      <div class="arch-box success">TransitionGap re-renders: idle &rarr; queue &rarr; processing &rarr; processed</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ SLIDE 5: STORE SHAPE ═══════════════════ -->
+<section class="slide">
+  <span class="slide-number">05</span>
+  <h3>State Management</h3>
+  <h2>Store additions (Phase 1)</h2>
+  <div class="code-block">
+<span class="comment">// Global transition settings</span>
+<span class="type">globalPresetId</span>: <span class="keyword">string</span>          <span class="comment">// ""</span>
+<span class="type">globalPrompt</span>: <span class="keyword">string</span>             <span class="comment">// ""</span>
+<span class="type">globalDuration</span>: <span class="keyword">number</span>           <span class="comment">// 5</span>
+<span class="type">globalModel</span>: <span class="keyword">VideoModel</span>          <span class="comment">// "wan-i2v"</span>
+<span class="type">globalNumInferenceSteps</span>: <span class="keyword">number</span> <span class="comment">// 30</span>
+<span class="type">globalGuidance</span>: <span class="keyword">number</span>           <span class="comment">// 5.0</span>
+
+<span class="comment">// Derived from keyframe pairs (auto-recomputed)</span>
+<span class="type">transitions</span>: <span class="keyword">FlowTransition[]</span>
+
+<span class="comment">// UI state (not persisted)</span>
+<span class="type">selectedTransitionIndex</span>: <span class="keyword">number | null</span>
+<span class="type">settingsExpanded</span>: <span class="keyword">boolean</span>
+  </div>
+  <p class="slide-intro" style="margin-top: 24px;">Persist version bumps 1 &rarr; 2. <code>onRehydrateStorage</code> resets stale processing/queue to "failed".</p>
+</section>
+
+<!-- ═══════════════════ SLIDE 6: TRANSITION LIFECYCLE ═══════════════════ -->
+<section class="slide">
+  <span class="slide-number">06</span>
+  <h3>State Machine</h3>
+  <h2>Transition lifecycle</h2>
+  <div class="flow-diagram">
+    <div class="flow-node idle">idle</div>
+    <div class="flow-connector"></div>
+    <div class="flow-row">
+      <span style="font-size: 12px; color: var(--text-muted);">configure &darr;</span>
+      <span style="font-size: 12px; color: var(--text-muted); margin-left: 60px;">generate &darr;</span>
+    </div>
+    <div class="flow-branch">
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 12px;">
+        <div class="flow-node" style="background: var(--accent-dim); border: 1px solid var(--accent); color: var(--accent);">configured</div>
+        <span style="font-size: 11px; color: var(--text-muted);">generate &darr;</span>
+      </div>
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 12px;">
+        <div class="flow-node queued">queue</div>
+        <div class="flow-connector"></div>
+        <div class="flow-node processing">processing (0-100%)</div>
+        <div class="flow-connector"></div>
+        <div class="flow-row" style="gap: 24px;">
+          <div class="flow-node processed">processed</div>
+          <div class="flow-node failed">failed</div>
+        </div>
+        <div class="flow-connector"></div>
+        <div class="flow-node" style="background: var(--accent-dim); border: 1px solid var(--accent); color: var(--accent);">uprez (same lifecycle)</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ SLIDE 7: GAP VISUAL STATES ═══════════════════ -->
+<section class="slide">
+  <span class="slide-number">07</span>
+  <h3>Visual Design</h3>
+  <h2>Transition gap states</h2>
+  <div class="mockup-container">
+    <div class="mockup-titlebar">
+      <div class="mockup-dot"></div>
+      <div class="mockup-dot"></div>
+      <div class="mockup-dot"></div>
+    </div>
+    <div class="mockup-body">
+      <div class="strip-mockup">
+        <div class="kf-mock"><span class="kf-mock-label">KF 1</span></div>
+        <div class="gap-mock">
+          <div class="gap-line"></div>
+          <span class="gap-status idle">idle</span>
+        </div>
+        <div class="kf-mock"><span class="kf-mock-label">KF 2</span></div>
+        <div class="gap-mock">
+          <div class="gap-line configured"></div>
+          <span class="gap-status configured">5s</span>
+        </div>
+        <div class="kf-mock"><span class="kf-mock-label">KF 3</span></div>
+        <div class="gap-mock">
+          <span class="gap-status queued">queued</span>
+        </div>
+        <div class="kf-mock"><span class="kf-mock-label">KF 4</span></div>
+        <div class="gap-mock">
+          <span class="gap-status processing">45%</span>
+          <div class="gap-progress"><div class="gap-progress-fill" style="width: 45%"></div></div>
+        </div>
+        <div class="kf-mock"><span class="kf-mock-label">KF 5</span></div>
+        <div class="gap-mock">
+          <div class="gap-line done"></div>
+          <span class="gap-status done">&check; 5s</span>
+        </div>
+        <div class="kf-mock"><span class="kf-mock-label">KF 6</span></div>
+        <div class="gap-mock">
+          <span class="gap-status failed">! failed</span>
+        </div>
+        <div class="kf-mock"><span class="kf-mock-label">KF 7</span></div>
+      </div>
+
+      <div class="settings-mock">
+        <div class="settings-header">
+          <span class="settings-title">Transition Settings</span>
+        </div>
+        <div class="settings-row">
+          <div class="settings-field">
+            <span class="settings-label">Preset</span>
+            <select class="settings-select"><option>Camera Basics</option></select>
+          </div>
+          <div class="settings-field">
+            <span class="settings-label">Duration</span>
+            <select class="settings-select"><option>5s</option></select>
+          </div>
+          <button class="settings-btn">Generate All</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ SLIDE 8: SETTINGS MODES ═══════════════════ -->
+<section class="slide">
+  <span class="slide-number">08</span>
+  <h3>Interaction</h3>
+  <h2>Settings panel modes</h2>
+  <table class="styled-table">
+    <thead>
+      <tr><th>Mode</th><th>Trigger</th><th>Behavior</th></tr>
+    </thead>
+    <tbody>
+      <tr><td style="color: var(--text);">Global</td><td>No gap selected</td><td>Edits affect all transitions</td></tr>
+      <tr><td style="color: var(--text);">Per-transition</td><td>Click a gap</td><td>Override &gt; global cascade</td></tr>
+      <tr><td style="color: var(--text);">Collapsed</td><td>Default view</td><td>Preset + Duration + Generate</td></tr>
+      <tr><td style="color: var(--text);">Expanded</td><td>Click "Customize"</td><td>+ Prompt, Model, LoRAs, Advanced (steps, guidance)</td></tr>
+    </tbody>
+  </table>
+  <p class="slide-intro" style="margin-top: 32px;">Override cascade: <code>transition.presetOverride ?? globalPresetId</code><br>
+  Changing model re-filters presets and clamps duration to allowed values.</p>
+</section>
+
+<!-- ═══════════════════ SLIDE 9: TASK BREAKDOWN ═══════════════════ -->
+<section class="slide">
+  <span class="slide-number">09</span>
+  <h3>Implementation</h3>
+  <h2>12 tasks, 4 phases</h2>
+  <div class="card-grid">
+    <div class="card">
+      <span class="card-label">Foundation</span>
+      <div class="card-title">Tasks 1&ndash;3</div>
+      <div class="card-desc">
+        Types (FlowTransition, TransitionStatus)<br>
+        Store extensions + persist v2 migration<br>
+        Preset resolution utility
+      </div>
+      <span class="card-status foundation">Types &amp; State</span>
+    </div>
+    <div class="card">
+      <span class="card-label">UI Components</span>
+      <div class="card-title">Tasks 4&ndash;6</div>
+      <div class="card-desc">
+        TransitionGapEnhanced (6 states)<br>
+        Strip integration<br>
+        Settings panel (global + per-transition)
+      </div>
+      <span class="card-status ui">Components</span>
+    </div>
+    <div class="card">
+      <span class="card-label">Hooks</span>
+      <div class="card-title">Tasks 7&ndash;8</div>
+      <div class="card-desc">
+        useFlowGeneration (axiosClient direct)<br>
+        useFlowJobProgress (Socket.IO + poll)
+      </div>
+      <span class="card-status hooks">Logic</span>
+    </div>
+    <div class="card">
+      <span class="card-label">Integration</span>
+      <div class="card-title">Tasks 9&ndash;12</div>
+      <div class="card-desc">
+        Wire into FlowBuilder<br>
+        Video preview + lightbox<br>
+        Action bar + uprez<br>
+        Final verification
+      </div>
+      <span class="card-status integration">Ship</span>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ SLIDE 10: KEY DECISIONS ═══════════════════ -->
+<section class="slide">
+  <span class="slide-number">10</span>
+  <h3>Design Decisions</h3>
+  <h2>Why we chose this approach</h2>
+  <div class="decision-grid">
+    <div class="decision-card">
+      <div class="decision-title">axiosClient directly (not mutation hooks)</div>
+      <div class="decision-why">Sequential multi-dream creation in Generate All loop requires imperative control. React Query mutations don't compose well for ordered sequential requests.</div>
+    </div>
+    <div class="decision-card">
+      <div class="decision-title">deriveTransitions() preserves state</div>
+      <div class="decision-why">Reordering or adding keyframes shouldn't lose generation results. Existing transitions matched by fromId:toId pair are preserved.</div>
+    </div>
+    <div class="decision-card">
+      <div class="decision-title">Socket.IO + 10s polling fallback</div>
+      <div class="decision-why">Primary real-time delivery with a safety net for dropped connections. Matches existing useStudioJobProgress pattern.</div>
+    </div>
+    <div class="decision-card">
+      <div class="decision-title">onRehydrateStorage reconciliation</div>
+      <div class="decision-why">No ghost "processing" states after page refresh. Any in-flight state is reset to "failed" so the user can retry cleanly.</div>
+    </div>
+    <div class="decision-card">
+      <div class="decision-title">No backend changes required</div>
+      <div class="decision-why">Uses existing /v1/dream CRUD + Socket.IO rooms. The worker already handles Wan I2V and LTX payloads. Zero deployment coordination.</div>
+    </div>
+    <div class="decision-card">
+      <div class="decision-title">Persist v2 migration</div>
+      <div class="decision-why">Clean upgrade from Phase 0. Existing localStorage data gets Phase 1 defaults merged in via Zustand persist migrate().</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ SLIDE 11: DEPENDENCIES ═══════════════════ -->
+<section class="slide">
+  <span class="slide-number">11</span>
+  <h3>Prerequisites</h3>
+  <h2>What we need before starting</h2>
+  <table class="styled-table">
+    <thead>
+      <tr><th>Dependency</th><th>Status</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="color: var(--text);">Phase 0 Keyframe Strip (PR #612)</td>
+        <td><span style="color: var(--success);">Merged</span></td>
+        <td>Base branch: feat/phase-0-keyframe-strip</td>
+      </tr>
+      <tr>
+        <td style="color: var(--text);">flow-theme.constants.ts</td>
+        <td><span style="color: var(--success);">Exists</span></td>
+        <td>Design tokens already in place</td>
+      </tr>
+      <tr>
+        <td style="color: var(--text);">action-presets.ts</td>
+        <td><span style="color: var(--success);">Exists</span></td>
+        <td>PresetPack + createActionsFromPreset</td>
+      </tr>
+      <tr>
+        <td style="color: var(--text);">Socket.IO /remote-control namespace</td>
+        <td><span style="color: var(--success);">Exists</span></td>
+        <td>job:progress events already broadcast</td>
+      </tr>
+      <tr>
+        <td style="color: var(--text);">Backend changes</td>
+        <td><span style="color: var(--accent);">None needed</span></td>
+        <td>Frontend-only feature</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════ SLIDE 12: STACK ═══════════════════ -->
+<section class="slide">
+  <span class="slide-number">12</span>
+  <h3>Tech Stack</h3>
+  <h2>What we're building with</h2>
+  <div class="card-grid" style="grid-template-columns: repeat(3, 1fr);">
+    <div class="card" style="text-align: center;">
+      <div class="card-title">React 18</div>
+      <div class="card-desc">Components + Hooks</div>
+    </div>
+    <div class="card" style="text-align: center;">
+      <div class="card-title">TypeScript</div>
+      <div class="card-desc">Strict types</div>
+    </div>
+    <div class="card" style="text-align: center;">
+      <div class="card-title">Zustand</div>
+      <div class="card-desc">Persist middleware</div>
+    </div>
+    <div class="card" style="text-align: center;">
+      <div class="card-title">styled-components v6</div>
+      <div class="card-desc">Scoped styles</div>
+    </div>
+    <div class="card" style="text-align: center;">
+      <div class="card-title">Socket.IO</div>
+      <div class="card-desc">Real-time progress</div>
+    </div>
+    <div class="card" style="text-align: center;">
+      <div class="card-title">Vitest</div>
+      <div class="card-desc">TDD workflow</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ SLIDE 13: CLOSE ═══════════════════ -->
+<section class="slide title-slide">
+  <div class="logo-mark">e</div>
+  <h1>Ready to <span class="accent">build</span></h1>
+  <p class="subtitle">12 tasks. TDD. Frontend-only. No backend coordination needed.</p>
+  <p class="meta" style="margin-top: 32px;">
+    Branch: <code style="color: var(--accent);">feat/phase-1-transition-generation</code><br>
+    Spec: docs/superpowers/specs/2026-05-14-phase-1-transition-generation-design.md
+  </p>
+</section>
+
+</body>
+</html>
