@@ -457,7 +457,7 @@ export class UserApiEndpointService {
       const { iv, content } = encrypt(data.apiKey);
       entity.apiKeyEncrypted = content;
       entity.apiKeyIv = iv;
-      entity.apiKeyLastFour = maskKey(data.apiKey);
+      entity.apiKeyLastFour = lastFour(data.apiKey);
     }
 
     if (data.name !== undefined) entity.name = data.name;
@@ -568,11 +568,11 @@ export const handleListEndpoints = async (
     const endpoints = await userApiEndpointService.list(userId);
     return res
       .status(httpStatus.OK)
-      .json(jsonResponse({ endpoints }, true, "Endpoints retrieved"));
+      .json(jsonResponse({ success: true, data: { endpoints } }));
   } catch (err) {
     return res
       .status(httpStatus.INTERNAL_SERVER_ERROR)
-      .json(jsonResponse(null, false, "Failed to list endpoints"));
+      .json(jsonResponse({ success: false, message: "Failed to list endpoints" }));
   }
 };
 
@@ -586,15 +586,15 @@ export const handleCreateEndpoint = async (
     if (result.error) {
       return res
         .status(httpStatus.UNPROCESSABLE_ENTITY)
-        .json(jsonResponse(null, false, result.error));
+        .json(jsonResponse({ success: false, message: result.error }));
     }
     return res
       .status(httpStatus.CREATED)
-      .json(jsonResponse({ endpoint: result.endpoint }, true, "Endpoint created"));
+      .json(jsonResponse({ success: true, data: { endpoint: result.endpoint } }));
   } catch (err) {
     return res
       .status(httpStatus.INTERNAL_SERVER_ERROR)
-      .json(jsonResponse(null, false, "Failed to create endpoint"));
+      .json(jsonResponse({ success: false, message: "Failed to create endpoint" }));
   }
 };
 
@@ -612,15 +612,15 @@ export const handleUpdateEndpoint = async (
         : httpStatus.UNPROCESSABLE_ENTITY;
       return res
         .status(status)
-        .json(jsonResponse(null, false, result.error));
+        .json(jsonResponse({ success: false, message: result.error }));
     }
     return res
       .status(httpStatus.OK)
-      .json(jsonResponse({ endpoint: result.endpoint }, true, "Endpoint updated"));
+      .json(jsonResponse({ success: true, data: { endpoint: result.endpoint } }));
   } catch (err) {
     return res
       .status(httpStatus.INTERNAL_SERVER_ERROR)
-      .json(jsonResponse(null, false, "Failed to update endpoint"));
+      .json(jsonResponse({ success: false, message: "Failed to update endpoint" }));
   }
 };
 
@@ -635,15 +635,15 @@ export const handleDeleteEndpoint = async (
     if (!deleted) {
       return res
         .status(httpStatus.NOT_FOUND)
-        .json(jsonResponse(null, false, "Endpoint not found"));
+        .json(jsonResponse({ success: false, message: "Endpoint not found" }));
     }
     return res
       .status(httpStatus.OK)
-      .json(jsonResponse(null, true, "Endpoint deleted"));
+      .json(jsonResponse({ success: true, message: "Endpoint deleted" }));
   } catch (err) {
     return res
       .status(httpStatus.INTERNAL_SERVER_ERROR)
-      .json(jsonResponse(null, false, "Failed to delete endpoint"));
+      .json(jsonResponse({ success: false, message: "Failed to delete endpoint" }));
   }
 };
 
@@ -658,15 +658,15 @@ export const handleTestEndpoint = async (
     if (!result.success) {
       return res
         .status(httpStatus.UNPROCESSABLE_ENTITY)
-        .json(jsonResponse(null, false, result.error ?? "Test failed"));
+        .json(jsonResponse({ success: false, message: result.error ?? "Test failed" }));
     }
     return res
       .status(httpStatus.OK)
-      .json(jsonResponse(null, true, "Connection successful"));
+      .json(jsonResponse({ success: true, message: "Connection successful" }));
   } catch (err) {
     return res
       .status(httpStatus.INTERNAL_SERVER_ERROR)
-      .json(jsonResponse(null, false, "Failed to test endpoint"));
+      .json(jsonResponse({ success: false, message: "Failed to test endpoint" }));
   }
 };
 ```
@@ -931,18 +931,13 @@ export async function handleOpenAiJob(
         `${job.id}-${i}`,
       );
     } else if (item.b64_json) {
-      // Write base64 to temp file, upload
-      const buffer = Buffer.from(item.b64_json, "base64");
-      const fs = await import("fs/promises");
-      const os = await import("os");
-      const path = await import("path");
-      const tmpPath = path.join(os.tmpdir(), `openai-${job.id}-${i}.png`);
-      await fs.writeFile(tmpPath, buffer);
-      r2Url = await r2UploadService.uploadImageToR2(
-        tmpPath,
+      // b64_json: convert to a data URL so downloadAndUploadImage can fetch it.
+      // Node's fetch() supports data: URIs.
+      const dataUrl = `data:image/png;base64,${item.b64_json}`;
+      r2Url = await r2UploadService.downloadAndUploadImage(
+        dataUrl,
         `${job.id}-${i}`,
       );
-      await fs.unlink(tmpPath);
     } else {
       APP_LOGGER.warn(`OpenAI result ${i} has no url or b64_json`);
       continue;
@@ -1130,16 +1125,16 @@ async function processResults(
   return { r2Urls, renderDuration };
 }
 
-function parseFalSize(size: string): string {
-  // Convert "1024x1024" → FAL format
-  // FAL accepts { width, height } or preset strings
+function parseFalSize(size: string): { width: number; height: number } | string {
+  // Convert "1024x1024" → FAL image_size object { width, height }.
+  // FAL accepts both object format and preset strings. Object is more precise.
   const parts = size.split("x");
   if (parts.length === 2) {
-    const w = parseInt(parts[0], 10);
-    const h = parseInt(parts[1], 10);
-    if (w === h) return "square";
-    if (w > h) return "landscape_16_9";
-    return "portrait_9_16";
+    const width = parseInt(parts[0], 10);
+    const height = parseInt(parts[1], 10);
+    if (!isNaN(width) && !isNaN(height)) {
+      return { width, height };
+    }
   }
   return size;
 }
@@ -2591,7 +2586,7 @@ const algoParams = selectedUserEndpoint
     };
 ```
 
-- [ ] **Step 3: Add i2i variation to keyframe card**
+- [ ] **Step 4: Add i2i variation to keyframe card**
 
 In `frontend/src/components/pages/studio/components/keyframe-card.tsx`, add a "Vary (i2i)" button to the variations menu:
 
@@ -2617,7 +2612,7 @@ const i2iEndpointUuid = useFlowStore((s) => s.i2iEndpointUuid);
 </VariationButton>
 ```
 
-- [ ] **Step 4: Wire i2i generation in flow-builder.tsx**
+- [ ] **Step 5: Wire i2i generation in flow-builder.tsx**
 
 In `frontend/src/components/pages/studio/components/flow-builder.tsx`, add the i2i variation handler:
 
@@ -2720,17 +2715,17 @@ const handleI2iVariation = useCallback(
 
 Pass `onRequestI2iVariation={handleI2iVariation}` to the keyframe card component.
 
-- [ ] **Step 5: Run type-check**
+- [ ] **Step 6: Run type-check**
 
 Run: `cd frontend && pnpm type-check`
 Expected: No errors.
 
-- [ ] **Step 6: Run tests**
+- [ ] **Step 7: Run tests**
 
 Run: `cd frontend && pnpm vitest run`
 Expected: All tests pass.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 cd frontend
