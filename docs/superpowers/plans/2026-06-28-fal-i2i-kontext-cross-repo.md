@@ -76,11 +76,12 @@ git commit -m "feat(worker): register flux-kontext-i2i model + image input field
 
 **Files:**
 - Modify: `src/providers/fal.provider.ts`
-- Test: `src/providers/__tests__/fal.provider.test.ts` (create if absent — follow the repo's test layout)
 
-**Interfaces — Consumes:** `NormalizedImageInput.imageUrl`. **Produces:** Kontext request body shape `{ prompt, image_url, num_images, seed? }`.
+> **Worker has no test runner.** `package.json`'s `test` is the stub `echo … && exit 1`; there are no jest/vitest deps and zero test files. So the usual failing-test-first cycle is not available here. **Primary verification = `npm run build` (tsc) + the Task 9 staging smoke** (which asserts the real fal request body). `buildKontextInput` is a pure function — if you want unit coverage, do the *optional* runner setup below; otherwise skip the test steps. Do **not** rely on `npm test`.
+>
+> **Optional runner setup** (only if adding worker unit tests): `npm i -D vitest`, set `"test": "vitest run"` in `package.json`, then the assertions below run via `npm test -- fal.provider`.
 
-- [ ] **Step 1: Write the failing test for the Kontext body builder**
+- [ ] **Step 1 (optional): Unit assertions for the builder**
 
 ```ts
 import { buildKontextInput } from '../fal.provider';
@@ -97,12 +98,7 @@ test('buildKontextInput omits seed when negative/absent', () => {
 });
 ```
 
-- [ ] **Step 2: Run — verify it fails**
-
-Run: `npm test -- fal.provider`
-Expected: FAIL (`buildKontextInput` not exported).
-
-- [ ] **Step 3: Implement and export `buildKontextInput`; route it**
+- [ ] **Step 2: Implement and export `buildKontextInput`; route it**
 
 In `src/providers/fal.provider.ts`:
 ```ts
@@ -118,17 +114,17 @@ export function buildKontextInput(input: NormalizedImageInput): Record<string, u
   return body;
 }
 ```
-In `falImageProvider.submitImage`, branch on the model: when the input has `imageUrl` (Kontext path) use `buildKontextInput`, else `buildFluxInput`. (The handler in Task 3 only sets `imageUrl` for `inputImage` models, so presence of `imageUrl` is a safe discriminator.)
+In `falImageProvider.submitImage` (signature `(endpoint, input, apiKey)` — note it does **not** receive `modelConfig`), branch on `input.imageUrl`: when present (Kontext path) use `buildKontextInput`, else `buildFluxInput`. The handler in Task 3 only sets `imageUrl` for `inputImage` models, so `input.imageUrl` presence is a safe discriminator (this is why we branch on the input, not on `modelConfig`).
 
-- [ ] **Step 4: Run — verify pass + build**
+- [ ] **Step 3: Build (authoritative gate)**
 
-Run: `npm test -- fal.provider && npm run build`
-Expected: PASS, compiles.
+Run: `npm run build` (and `npm test -- fal.provider` only if you did the optional runner setup).
+Expected: compiles.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/providers/fal.provider.ts src/providers/__tests__/fal.provider.test.ts
+git add src/providers/fal.provider.ts   # + the optional test file if added
 git commit -m "feat(worker): add Kontext image-to-image input builder"
 ```
 
@@ -138,28 +134,12 @@ git commit -m "feat(worker): add Kontext image-to-image input builder"
 
 **Files:**
 - Modify: `src/workers/fal-handlers.ts`
-- Test: `src/workers/__tests__/fal-handlers.test.ts` (add a case; mock `processImageForEndpoint` + provider)
 
-**Interfaces — Consumes:** `WORKER_MODELS[...].inputImage`, `processImageForEndpoint` (`job-handlers.ts:643`). **Produces:** `input.imageUrl` set for i2i models.
+**Interfaces — Consumes:** `WORKER_MODELS[...].inputImage`, `processImageForEndpoint` (`job-handlers.ts:643`, signature `(imageInput: string, jobId: string) => Promise<string>`). **Produces:** `input.imageUrl` set for i2i models.
 
-- [ ] **Step 1: Write the failing test**
+> Same runner caveat as Task 2 — verify via `npm run build` + Task 9 staging smoke (no worker test runner). If you added vitest in Task 2, you may add a handler test mocking `processImageForEndpoint` + `submitImage` and asserting `input.imageUrl === 'https://r2/resolved.png'` for `job.data.source_dream_uuid: 'src-uuid'`.
 
-```ts
-test('handleFalImageJob resolves source_dream_uuid to imageUrl for inputImage models', async () => {
-  // job.data = { prompt:'x', seed:1, infinidream_algorithm:'flux-kontext-i2i',
-  //              dream_uuid:'d1', source_dream_uuid:'src-uuid' }
-  // mock processImageForEndpoint('src-uuid', ...) -> 'https://r2/resolved.png'
-  // assert submitImage called with input.imageUrl === 'https://r2/resolved.png'
-});
-```
-(Follow the existing handler-test mocking style in the repo.)
-
-- [ ] **Step 2: Run — verify fail**
-
-Run: `npm test -- fal-handlers`
-Expected: FAIL.
-
-- [ ] **Step 3: Implement the i2i branch**
+- [ ] **Step 1: Implement the i2i branch**
 
 In `handleFalImageJob` (`:93`), after resolving `modelConfig`, when `modelConfig.inputImage`:
 ```ts
@@ -172,15 +152,15 @@ input.imageUrl = imageUrl;
 ```
 Set this on the `NormalizedImageInput` before `submitImage`. Import `processImageForEndpoint` if it isn't already in scope.
 
-- [ ] **Step 4: Run — pass + build**
+- [ ] **Step 2: Build (authoritative gate)**
 
-Run: `npm test -- fal-handlers && npm run build`
-Expected: PASS, compiles.
+Run: `npm run build`
+Expected: compiles.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add src/workers/fal-handlers.ts src/workers/__tests__/fal-handlers.test.ts
+git add src/workers/fal-handlers.ts   # + the optional test file if added
 git commit -m "feat(worker): resolve source image for Kontext i2i jobs"
 ```
 
@@ -195,7 +175,9 @@ git commit -m "feat(worker): resolve source image for Kontext i2i jobs"
 - Modify: `src/utils/cost.util.ts`
 - Test: `src/utils/__tests__/cost.util.test.ts`
 
-**Interfaces — Produces:** `ModelPricing` variant `{ kind: 'perImage'; usdPerImage: number }`; `priceFromPricing` handles it.
+**Interfaces — Produces:** `ModelPricing` variant `{ kind: 'perImage'; usdPerImage: number }`; `priceFromPricing` handles it (flat — this codebase always generates qty 1; `JobCostParams` is `{ durationSec?, imageSize? }`, there is **no** `num_images`).
+
+> **Note:** `priceFromPricing` is currently module-private (`cost.util.ts:61`). Add `export` to it so the unit test can import it. (`assertValidParams` stays private.)
 
 - [ ] **Step 1: Branch**
 
@@ -206,21 +188,18 @@ git fetch origin --prune && git switch -c feat/studio-i2i-variations origin/stag
 
 - [ ] **Step 2: Write failing pricing test**
 
+Place in `src/__tests__/cost.util.test.ts` (repo keeps tests flat in `src/__tests__/`, not co-located).
 ```ts
-import { priceFromPricing } from '../cost.util';
-test('perImage pricing multiplies by num_images', () => {
-  expect(priceFromPricing({ kind: 'perImage', usdPerImage: 0.04 }, { num_images: 2 })).toBeCloseTo(0.08);
-});
-test('perImage defaults num_images to 1', () => {
+import { priceFromPricing } from '../utils/cost.util';
+test('perImage pricing is a flat per-image cost', () => {
   expect(priceFromPricing({ kind: 'perImage', usdPerImage: 0.04 }, {})).toBeCloseTo(0.04);
 });
 ```
-(Match `priceFromPricing`'s actual signature — adjust the params arg shape to the real one.)
 
 - [ ] **Step 3: Run — verify fail**
 
 Run: `pnpm test -- cost.util`
-Expected: FAIL (perImage unhandled).
+Expected: FAIL (`priceFromPricing` not exported / `perImage` unhandled).
 
 - [ ] **Step 4: Implement**
 
@@ -228,7 +207,7 @@ In `src/types/model.types.ts`, extend the union:
 ```ts
 | { kind: 'perImage'; usdPerImage: number }
 ```
-In `src/utils/cost.util.ts`: handle `perImage` in `priceFromPricing` (`usdPerImage * (num_images ?? 1)`), and ensure `assertValidParams` does **not** require `constraints.imageSizes` for a `perImage` model.
+In `src/utils/cost.util.ts`: `export` `priceFromPricing`; handle `perImage` as a flat cost: `case 'perImage': return pricing.usdPerImage;` (no quantity term — `JobCostParams` carries none). Ensure `assertValidParams` does **not** require `constraints.imageSizes` for a `perImage` model.
 
 - [ ] **Step 5: Run — pass + build**
 
@@ -238,7 +217,7 @@ Expected: PASS, compiles.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/types/model.types.ts src/utils/cost.util.ts src/utils/__tests__/cost.util.test.ts
+git add src/types/model.types.ts src/utils/cost.util.ts src/__tests__/cost.util.test.ts
 git commit -m "feat(backend): add perImage pricing kind"
 ```
 
@@ -278,8 +257,8 @@ Expected: may fail until Task 6 registers the algorithm id — that's expected; 
 
 - [ ] **Step 1: Add to all three places**
 
-- `SupportedAlgorithm` union: add `'flux-kontext-i2i'`.
-- `ALGORITHM_TO_QUEUE_MAP`: add `'flux-kontext-i2i': 'falimage'`.
+- `SUPPORTED_ALGORITHMS` array (`~:13`): add `'flux-kontext-i2i'`. (`SupportedAlgorithm` is the derived type `(typeof SUPPORTED_ALGORITHMS)[number]` — editing the array updates the type and forces the `Record` map entry below.)
+- `ALGORITHM_TO_QUEUE_MAP` (`~:27`): add `'flux-kontext-i2i': 'falimage'` (same queue flux-schnell uses — verified).
 - `isImageGenerationAlgorithm` allowlist (`~:95`): add `'flux-kontext-i2i'`.
 
 - [ ] **Step 2: Build + relevant tests**
@@ -289,14 +268,14 @@ Expected: PASS (Record-over-keys now complete; catalog from Task 5 compiles).
 
 - [ ] **Step 3: Add a routing test**
 
-Add a case asserting `isImageGenerationAlgorithm('flux-kontext-i2i') === true` and `ALGORITHM_TO_QUEUE_MAP['flux-kontext-i2i'] === 'falimage'`.
+In `src/__tests__/prompt.util.test.ts`, add a case asserting `isImageGenerationAlgorithm('flux-kontext-i2i') === true` and `ALGORITHM_TO_QUEUE_MAP['flux-kontext-i2i'] === 'falimage'`.
 Run: `pnpm test -- prompt.util`
 Expected: PASS.
 
 - [ ] **Step 4: Commit Tasks 5 + 6**
 
 ```bash
-git add src/constants/models.constants.ts src/utils/prompt.util.ts src/utils/__tests__/prompt.util.test.ts
+git add src/constants/models.constants.ts src/utils/prompt.util.ts src/__tests__/prompt.util.test.ts
 git commit -m "feat(backend): add flux-kontext-i2i model + algorithm registration"
 ```
 
@@ -313,7 +292,7 @@ git commit -m "feat(backend): add flux-kontext-i2i model + algorithm registratio
 
 - [ ] **Step 1: Extend the union + cost fn (mirror backend Task 4)**
 
-Add `| { kind: 'perImage'; usdPerImage: number }` to the frontend `ModelPricing`, and handle it in `model-cost.util.ts` identically (`usdPerImage * (numImages ?? 1)`).
+Add `| { kind: 'perImage'; usdPerImage: number }` to the frontend `ModelPricing` (`src/types/model.types.ts`), and handle it **flat** in `estimateUnitCostUsd` (`src/utils/model-cost.util.ts:34`; its `CostParams` is `{ durationSec?, imageSize? }` — no quantity field): `case 'perImage': return pricing.usdPerImage;`. Keep this byte-for-byte consistent with the backend flat implementation.
 
 - [ ] **Step 2: Test + type-check**
 
@@ -334,13 +313,13 @@ git commit -m "feat(frontend): mirror perImage pricing kind"
 **Files:**
 - Modify: `src/components/pages/studio/components/variation-settings-panel.tsx` (un-hide i2i)
 - Modify: `src/components/pages/studio/components/flow-builder.tsx` (i2i payload)
-- Modify: `src/components/pages/studio/components/variation-presets.ts` (if methods enumerated there)
+- Modify: `src/components/pages/studio/constants/variation-presets.ts` (if methods enumerated there)
 
-**Interfaces — Consumes:** the API-driven model list now containing `flux-kontext-i2i`; the parent keyframe's source dream UUID from flow store.
+**Interfaces — Consumes:** the API-driven model list now containing `flux-kontext-i2i`; the parent keyframe's source dream UUID (`FlowKeyframe.dreamUuid` — documented "Source image Dream UUID"; **not** `keyframeUuid`, which is the backend Keyframe UUID).
 
-- [ ] **Step 1: Un-hide the i2i method (reverse Part-1 Task 12)**
+- [ ] **Step 1: Add a UI affordance that triggers an i2i variation**
 
-Re-add the `"i2i"` option to the method picker. Remove the Part-1 "hidden until Part 2" comment.
+In Part 1, i2i became *unreachable* (its only entry point was the removed BYO endpoint `<select>`) — so this is **new UI**, not un-hiding. The variation model list is API-driven and now includes `flux-kontext-i2i` (Task 5). Surface it in `variation-settings-panel.tsx`'s model dropdown; when the user selects the Kontext model, the Vary action emits a `VariationCandidate` with `method: "i2i"` (driving the payload in Step 2). Remove the Part-1 deferral comment added in Part-1 Task 12.
 
 - [ ] **Step 2: Build the i2i payload in `flow-builder.tsx`**
 
@@ -353,7 +332,7 @@ For the i2i method, send:
   seed: baseSeed,
 }
 ```
-No `size`, no `userEndpointUuid`, no `mediaType`. `parentSourceDreamUuid` is the parent keyframe's `dreamUuid` (the source image dream) from the flow store — confirm the field name on `FlowKeyframe`.
+No `size`, no `userEndpointUuid`, no `mediaType`. `parentSourceDreamUuid` is the parent keyframe's **`dreamUuid`** (the candidate's parent is reachable via `i2iParentId`; the parent's `dreamUuid` is the source image dream). Do **not** use `keyframeUuid`.
 
 - [ ] **Step 3: Type-check + lint + tests**
 
@@ -365,7 +344,7 @@ Expected: PASS. Confirm `grep -n userEndpointUuid src/components/pages/studio` r
 ```bash
 git add src/components/pages/studio/components/variation-settings-panel.tsx \
         src/components/pages/studio/components/flow-builder.tsx \
-        src/components/pages/studio/components/variation-presets.ts
+        src/components/pages/studio/constants/variation-presets.ts
 git commit -m "feat(frontend): enable i2i variation via flux-kontext (provider-key resolved server-side)"
 ```
 

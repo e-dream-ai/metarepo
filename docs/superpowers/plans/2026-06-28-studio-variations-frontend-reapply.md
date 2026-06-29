@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Re-apply the studio **variations (seed + expansion)** and **prompt expansion** UX onto `origin/stage`, dropping the PR's user-settings and session systems (stage owns both). The `i2i` variation method ships **hidden** here; it is enabled in Part 2.
+**Goal:** Re-apply the studio **variations (prompt-expansion variations, with a controllable seed)** and the **prompt-expansion badge** UX onto `origin/stage`, dropping the PR's user-settings and session systems (stage owns both). Note: the only variation method the PR actually *emits* is `"expansion"` (the `"seed"` member of `VariationCandidate.method` is a type-level value with no producer; `variationSeed`/`DEFAULT_VARIATION_SEED` is a stable seed *value* layered into expansion batches, not a separate method). The `i2i` method ships **unreachable** here; it is enabled in Part 2.
 
 **Architecture:** Fresh branch off `origin/stage`. Verbatim-copy the genuinely-new files from the PR branch `feat/api-key-config-i2i`; additively graft variation types/actions/UI-state onto stage's `flow.store`/`studio.store`/`flow.types`; reconcile the handful of files stage also rewrote; strip all BYO-endpoint reads (replaced server-side in Part 2).
 
@@ -15,6 +15,8 @@
 - Package manager: **pnpm** (never npm/yarn).
 - Repo: `/Users/maxcarlsonold/edream/frontend`. Source-of-truth for copies: branch `feat/api-key-config-i2i`. Base: `origin/stage`.
 - Verify commands: `pnpm run type-check` (`tsc --noEmit`), `pnpm run lint` (`eslint . --ext .js,.ts`), `pnpm test` (`vitest run`).
+- **`pnpm run lint` does NOT cover `.tsx`** (its `--ext` excludes `.tsx`). For wiring tasks, **`pnpm run type-check` is the authoritative gate** for `.tsx` correctness; treat a clean `type-check` as the pass signal, not lint.
+- **BYO removal is "until grep is clean":** when stripping `useUserApiEndpoints`/`userEndpointUuid`/`i2iEndpoint*`/`UserApiEndpoint`/`selectedEndpoint` from a file, remove **every** resulting dangling reference (state, `useMemo`/`useCallback` deps, guards, JSX) until that file's `grep -nE "useUserApiEndpoints|UserApiEndpoint|userEndpointUuid|i2iEndpoint|selectedEndpoint"` returns nothing. The line numbers cited in tasks are starting points, not the complete set.
 - **Errors → Bugsnag**, never `console.error` (project rule).
 - **Never persist unsettled records**: `partialize` must exclude `i2iCandidate` keyframes and any record without a backend UUID.
 - **No `userEndpointUuid`, no `useUserApiEndpoints`, no `endpoint-presets`** anywhere — that feature is dropped.
@@ -160,23 +162,27 @@ Copy the action implementations verbatim from `git show feat/api-key-config-i2i:
 
 - [ ] **Step 4: Extend stage's `reconcileStaleTransitions`**
 
-Inside stage's existing `reconcileStaleTransitions` action (`flow.store.ts:339`), add the PR's `reconcileVariations` helper and map it over keyframe + transition `variations`. Both rehydration entry points (`onRehydrateStorage:393`, `session.store.loadSession:201`) already call this action, so no other call sites change.
+Inside stage's existing `reconcileStaleTransitions` action (`flow.store.ts:339`), add the PR's `reconcileVariations` helper and map it over keyframe + transition `variations`. Both rehydration entry points (`onRehydrateStorage:393`, `session.store.loadSession:201`) already call this action, so no other call sites change. Use the PR's **exact** body (PR `flow.store.ts:424–463`) — note it **fails** in-flight variations that have **no `dreamUuid`** (no recoverable backend job) and **keeps** those with a `dreamUuid` (the polling hook re-attaches). A no-op here ships permanent ghost "processing" spinners.
 
 ```ts
 const reconcileVariations = (vars?: VariationCandidate[]) =>
   vars?.map((v) =>
-    v.status === "processing" || v.status === "queue"
-      ? { ...v /* leave in-flight; status refreshed by job progress */ }
+    (v.status === "queue" || v.status === "processing") && !v.dreamUuid
+      ? { ...v, status: "failed" as const, progress: undefined }
       : v,
   );
-// within the set(): map transitions and keyframes, applying reconcileVariations to each .variations
+// within the existing set(): add  ...(t.variations && { variations: reconcileVariations(t.variations) })
+// to the transition map, and map keyframes:  kf.variations ? { ...kf, variations: reconcileVariations(kf.variations) } : kf
 ```
 
-Use the exact body from the PR's `reconcileStaleTransitions`/`reconcileVariations` (lines ~220–260 of the PR's flow.store).
+- [ ] **Step 5: Port the full partialize variation graft**
 
-- [ ] **Step 5: Add the partialize candidate filter**
+Stage's exported `flowPartialize` (`flow.store.ts:150`) currently strips `variations`. Port the PR's partialize variation handling (PR `flow.store.ts:613–645`) onto it — three edits:
+1. Keyframe `.filter(...)`: add `&& !kf.i2iCandidate` (staging candidates never persist).
+2. Keyframe `.map(...)`: add `variations: kf.variations?.filter((v) => v.status !== "queue" && v.status !== "processing")` and `activeVariationId: kf.activeVariationId` (persist settled variations, not in-flight).
+3. `transitions` map: `transitions: state.transitions.map((t) => ({ ...t, variations: t.variations?.filter((v) => v.status !== "queue" && v.status !== "processing") }))`.
 
-In stage's exported `flowPartialize` (`flow.store.ts:150`), add `&& !kf.i2iCandidate` to the keyframe `.filter(...)` so staging candidates are never persisted.
+Without (2)/(3), keyframe variations never survive a raw reload and in-flight transition variations get persisted then failed. (The T13 session-switch smoke routes through `session.store` full objects and would NOT catch this — verify a raw page reload too.)
 
 - [ ] **Step 6: Run tests + type-check**
 
@@ -197,11 +203,11 @@ git commit -m "feat(studio): graft variation actions + reconcile/partialize into
 **Files:**
 - Modify: `src/stores/studio.store.ts`
 
-**Interfaces — Produces (consumed by Task 6):** `variationPresetId`, `variationCustomPrompt`, `variationSeed`, their setters, and `DEFAULT_VARIATION_SEED`.
+**Interfaces — Produces (consumed by Task 6):** `variationPresetId` (defaults to `DEFAULT_VARIATION_PRESET_ID` from `variation-presets.ts`), `variationCustomPrompt`, `variationSeed` (defaults to `DEFAULT_VARIATION_SEED`), and their setters.
 
 - [ ] **Step 1: Graft the state + setters**
 
-Copy the variation state fields, setters, and `DEFAULT_VARIATION_SEED` from `git show feat/api-key-config-i2i:src/stores/studio.store.ts`.
+Copy the variation state fields, setters, `DEFAULT_VARIATION_SEED`, and the `variationPresetId` default (`DEFAULT_VARIATION_PRESET_ID`, imported from `../constants/variation-presets` added in Task 5) from `git show feat/api-key-config-i2i:src/stores/studio.store.ts`.
 
 - [ ] **Step 2: Persist the choices in `studioPartialize`**
 
@@ -433,28 +439,29 @@ git commit -m "feat(studio): wire variation progress + candidate swap-in into ge
 
 ---
 
-### Task 12: Hide the `i2i` variation method (Part 1 ships seed + expansion)
+### Task 12: Confirm the `i2i` method is unreachable (it has no UI without BYO)
+
+The PR only ever reached the i2i route through the BYO endpoint `<select>` (the `endpoint:`-prefixed option in `flow-builder.tsx` and the panel `optgroup`). Tasks 6/8/9 already removed those, so i2i is unreachable as a *side effect* of the BYO strip — there is no separate method picker to edit. This task just verifies that and documents it.
 
 **Files:**
-- Modify: `src/components/pages/studio/components/variation-settings-panel.tsx` (method picker)
-- Modify: `src/components/pages/studio/constants/variation-presets.ts` (if methods are enumerated there)
+- Modify: `src/components/pages/studio/components/variation-settings-panel.tsx` (add a comment only)
 
-- [ ] **Step 1: Gate out the i2i method**
+- [ ] **Step 1: Verify no UI produces `method: "i2i"`**
 
-Wherever the variation method is chosen (settings panel and/or presets), omit/disable the `"i2i"` option so only `"seed"` and `"expansion"` are selectable. Leave the `VariationCandidate.method: "i2i"` type intact (Part 2 re-enables the UI). Add a one-line code comment: `// i2i method enabled in Part 2 (fal Kontext) — hidden until a built-in image path exists`.
+Run: `git grep -n 'method: *"i2i"\|"i2i"' src/components/pages/studio`
+Expected: only type-level / switch-arm references (e.g. in `variation-status.ts`), no UI control that *emits* an i2i candidate. The `VariationCandidate.method: "i2i"` type stays intact for Part 2.
 
-- [ ] **Step 2: Verify**
+- [ ] **Step 2: Document the deferral**
 
-Run: `grep -rn '"i2i"' src/components/pages/studio/components/variation-settings-panel.tsx`
-Expected: no selectable i2i option remains (type-level references elsewhere are fine).
+Add a one-line comment near the variation method/model selection in `variation-settings-panel.tsx`: `// i2i method has no built-in image path until Part 2 (fal Kontext); only expansion variations are reachable here.`
+
+- [ ] **Step 3: Verify + commit**
+
 Run: `pnpm run type-check && pnpm test src/components/pages/studio`
 Expected: PASS.
-
-- [ ] **Step 3: Commit**
-
 ```bash
-git add src/components/pages/studio/components/variation-settings-panel.tsx src/components/pages/studio/constants/variation-presets.ts
-git commit -m "feat(studio): hide i2i variation method until Part 2"
+git add src/components/pages/studio/components/variation-settings-panel.tsx
+git commit -m "docs(studio): note i2i variation method deferred to Part 2"
 ```
 
 ---
@@ -495,7 +502,7 @@ gh pr create --base stage --title "Studio variations (seed + expansion) + prompt
 
 - [ ] **Step 5: Manual smoke on staging**
 
-Run the local-frontend-against-staging setup; create keyframes, run a **seed** variation and an **expansion** variation, accept/discard candidates, confirm candidates never enter the timeline, confirm the prompt-expansion badge, and confirm a session switch preserves variation state. Confirm the i2i method is not offered.
+Run the local-frontend-against-staging setup; create keyframes, run an **expansion** variation (one variation per line or `{a|b|c}` syntax) with the seed control set, accept/discard candidates, confirm candidates never enter the timeline, confirm the prompt-expansion badge. Confirm variation state survives **both** a session switch **and** a raw page reload (the latter exercises the Task 3 partialize graft). Confirm no i2i variation can be triggered.
 
 ---
 
