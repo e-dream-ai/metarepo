@@ -100,21 +100,21 @@ Goal: a fal **image-to-image** model the variation i2i method can target. Reuses
 
 1. **`src/providers/provider.types.ts`** — add `imageUrl?: string` to `NormalizedImageInput`.
 2. **`src/config/models.config.ts`** — add an `ImageModelConfig` entry with an explicit i2i discriminator:
-   `'flux-kontext-i2i': { id, provider: 'fal', mediaType: 'image', endpoint: 'fal-ai/flux-pro/kontext', inputImage: true }`.
-   Add `inputImage?: boolean` to `ImageModelConfig` so the handler branches deterministically on config, not on job-data presence. *Confirm the exact fal endpoint slug during implementation* (Kontext Pro vs dev).
-3. **`src/providers/fal.provider.ts`** — `buildFluxInput` (or a Kontext-specific builder) passes `image_url: input.imageUrl` and `prompt` for the Kontext endpoint. FLUX Kontext takes `{ prompt, image_url }` and returns `images[]` — `pollImage` already extracts `images[].url`, so the poll path is unchanged.
+   `'flux-kontext-i2i': { id: 'flux-kontext-i2i', provider: 'fal', mediaType: 'image', endpoint: 'fal-ai/flux-pro/kontext', inputImage: true }`.
+   Add `inputImage?: boolean` to `ImageModelConfig` so the handler branches deterministically on config, not on job-data presence.
+3. **`src/providers/fal.provider.ts`** — add a **Kontext-specific `buildKontextInput`** (do NOT reuse `buildFluxInput`). Verified Kontext contract: required `prompt` + `image_url`; optional `seed`, `guidance_scale` (default 3.5), `num_images` (default 1), `aspect_ratio` (enum). **Kontext takes no `image_size`/width/height** — it derives output size from the input image — so the flux-schnell `image_size: {width,height}` block must be omitted. Build `{ prompt, image_url: input.imageUrl, num_images: 1, ...(seed>=0 ? {seed} : {}) }`. Output is `images[]` with `{url,height,width,content_type}` — `pollImage` already extracts `images[].url`, so the poll path is unchanged. Route Kontext to `buildKontextInput` in `submitImage` (branch on `modelConfig.inputImage` or endpoint).
 4. **`src/workers/fal-handlers.ts`** — `handleFalImageJob` (`:93`) currently destructures only `{ prompt, size, seed, num_inference_steps, infinidream_algorithm, dream_uuid, auto_upload }` — no image. When `modelConfig.inputImage`, also read **`source_dream_uuid`** from job data and call `processImageForEndpoint(source_dream_uuid, String(job.id))` (defined `job-handlers.ts:643`; same call the video handler uses — resolves UUID→dream image, URL passthrough, file→R2, or base64) and set `input.imageUrl`. Throw if an i2i model is missing the source image.
 
 ### Backend (`backend` repo)
 
-1. **`src/constants/models.constants.ts`** — add the catalog entry: `{ id: 'flux-kontext-i2i', label: 'FLUX.1 Kontext', provider: PROVIDERS.FAL, mediaType: IMAGE, constraints, pricing }`. The frontend model picker is **API-driven** (`useModels` → `GET /v1/models` → `ModelCatalogEntry[]`), so this entry auto-surfaces in the picker — no hardcoded frontend model list to edit.
+1. **`src/constants/models.constants.ts`** — add the catalog entry:
+   `{ id: 'flux-kontext-i2i', label: 'FLUX.1 Kontext', provider: PROVIDERS.FAL, mediaType: IMAGE, constraints: {}, pricing: { kind: 'perImage', usdPerImage: 0.04 } }`.
+   No `imageSizes` constraint (Kontext derives size from the input image). The frontend model picker is **API-driven** (`useModels` → `GET /v1/models` → `ModelCatalogEntry[]`), so this entry auto-surfaces — no hardcoded frontend model list to edit.
 2. **`utils/prompt.util.ts` — algorithm registration (three places, not one):**
    - `SupportedAlgorithm` union — add `'flux-kontext-i2i'`.
    - `ALGORITHM_TO_QUEUE_MAP` (`Record<SupportedAlgorithm, string>`, ~`:27`) — add `'flux-kontext-i2i': 'falimage'`. (TypeScript's `Record` over all keys forces this, so it can't ship missing — but enumerate it.)
-   - **`isImageGenerationAlgorithm` (~`:95`) — CRITICAL.** It hardcodes `["qwen-image","z-image-turbo","flux-schnell"]`, and `dream.controller.ts:176` uses it to default `mediaType = IMAGE` at dream creation. Without adding `'flux-kontext-i2i'` here, an i2i dream defaults to `VIDEO` and routes to the wrong queue/handler. **Either** add the id to this function **or** make the frontend always send `mediaType: "image"` on the i2i variation payload. Pick one explicitly.
-3. **Pricing** — Kontext is priced **per image**, but `ModelPricing` (`model.types.ts:17`) only has `perMegapixel` / `perSecond`. Two options, decide now:
-   - Add a `perImage` kind — touches **four** files that carry "KEEP IN SYNC" warnings: backend `model.types.ts` (union), `cost.util.ts` (`priceFromPricing` + `assertValidParams`), and the frontend mirrors `frontend/src/utils/model-cost.util.ts` + `frontend/src/types/model.types.ts`.
-   - Or map Kontext to `perMegapixel` at a fixed output size — but `assertValidParams` requires the prompt's `size` to be in `constraints.imageSizes`, so the i2i payload must send a whitelisted `size` even though output size derives from the input image.
+   - **`isImageGenerationAlgorithm` (~`:95`) — add `'flux-kontext-i2i'`** to the hardcoded `["qwen-image","z-image-turbo","flux-schnell"]`. `dream.controller.ts:176` uses it to default `mediaType = IMAGE` at creation; without it an i2i dream defaults to `VIDEO` and routes to the wrong queue. **Decision:** backend allowlist is authoritative (consistent with the other image models) — the frontend does not need to send `mediaType`.
+3. **Pricing — add a `perImage` kind, `$0.04`/image.** Verified: Kontext Pro is per-image, not per-megapixel, so `perImage` is correct and avoids the fixed-size `size` workaround. `ModelPricing` (`model.types.ts:17`) currently has only `perMegapixel` / `perSecond`. Adding `{ kind: "perImage"; usdPerImage: number }` touches **four** "KEEP IN SYNC" files: backend `model.types.ts` (union) + `cost.util.ts` (`priceFromPricing` returns `usdPerImage * num_images`; `assertValidParams` must not require `imageSizes` for `perImage`), and the frontend mirrors `frontend/src/utils/model-cost.util.ts` + `frontend/src/types/model.types.ts`.
 4. **`src/utils/dream.util.ts` — no change needed.** Fal routing already keys on `model.provider === FAL` and resolves the key via `resolveProviderKeyDecision`. `dream.util.ts:117` builds job data as `{ ...promptJson, dream_uuid, ... }` — the `...promptJson` spread already forwards any prompt field (incl. the source image) to the worker verbatim. The only real work is in the **worker** (read the field) + **frontend** (include the field). Do not edit `dream.util` for image threading.
 
 ### Frontend (`frontend` repo)
@@ -125,7 +125,7 @@ Goal: a fal **image-to-image** model the variation i2i method can target. Reuses
    `{ infinidream_algorithm: 'flux-kontext-i2i', prompt, source_dream_uuid: <parent keyframe source>, seed }`.
    No `userEndpointUuid`. Provider key resolves server-side.
 2. **Pin the source-image field to `source_dream_uuid`** — it must be byte-identical to the key `handleFalImageJob` reads (since `dream.util` forwards `...promptJson` verbatim), and `source_dream_uuid` reuses the video handler's `processImageForEndpoint` UUID→dream resolution. The parent keyframe's source is already in the flow store.
-3. If pricing uses fixed-size `perMegapixel` (not `perImage`), the payload must also send a `size` in the model's `constraints.imageSizes` so `assertValidParams` passes — even though i2i output size derives from the input. (Avoid by choosing `perImage`.)
+3. No `size` field needed — pricing is `perImage` and Kontext derives output size from the input image. (An optional `aspect_ratio` enum could be exposed later; not required for v1.)
 4. i2i method availability: no endpoint gating. It works whenever a fal key (personal or global) is resolvable. Optionally surface "uses your fal key if set, else platform key." Confirm credit/availability behavior with `resolveProviderKeyDecision` + admin-credits.
 
 ## Conflict-risk ranking (frontend)
@@ -154,8 +154,16 @@ Goal: a fal **image-to-image** model the variation i2i method can target. Reuses
 - **Part 1 `seed` + `expansion`** have **zero** backend dependency (those variation paths never touch the catalog) — independently shippable as a frontend-only PR onto stage.
 - The **`i2i` method is the only Part-1 feature coupled to Part 2.** Part 1 can land first with the i2i method **hidden/disabled**, then Part 2 (worker + backend + frontend wiring) enables it in a follow-up PR. This keeps the frontend re-apply unblocked by the cross-repo i2i work. The implementation plan should sequence accordingly: Part 1 → Part 2.
 
-## Confirm during implementation
+## Resolved (verified against fal docs, 2026-06)
 
-- Exact fal FLUX.1 Kontext endpoint slug + its input contract (`image_url`, optional `guidance_scale`/`strength`).
-- Pricing model for Kontext: **`perImage` (preferred — avoids the fixed-size `size` workaround)** vs fixed-size `perMegapixel`, and its credit handling across the four KEEP-IN-SYNC files.
-- `isImageGenerationAlgorithm` allowlist **vs** mandatory frontend `mediaType: "image"` — pick one for mediaType routing.
+- **Endpoint:** `fal-ai/flux-pro/kontext` (Kontext Pro, image-to-image).
+- **Input contract:** required `prompt`, `image_url`; optional `seed`, `guidance_scale` (3.5), `num_images` (1), `aspect_ratio` (enum), `output_format`. No `image_size`/width/height.
+- **Output:** `images[]` of `{url,height,width,content_type}` + `seed`, `prompt`, `timings`, `has_nsfw_concepts`.
+- **Pricing:** `$0.04`/image → new `perImage` `ModelPricing` kind.
+- **mediaType routing:** backend-authoritative via `isImageGenerationAlgorithm` allowlist; frontend need not send `mediaType`.
+- **Source-image field:** `source_dream_uuid` (frontend ↔ worker, forwarded verbatim by `dream.util`).
+
+## Verify at the keyboard (runtime, not design)
+
+- Live smoke-test one Kontext call (fal occasionally revises optional params / safety_tolerance behavior).
+- Confirm `cost.util.ts assertValidParams` doesn't reject a `perImage` model lacking `imageSizes` once the new kind is added.
