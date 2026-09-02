@@ -36,6 +36,58 @@ Frontend (React) ──→ Backend (Node/Express) ──→ Worker (BullMQ)
 | `landing-page`          | Next.js/React/Tailwind/Biome      | Static website (infinidream.ai)                        |
 | `client`                | C++                               | Native macOS desktop app/screensaver                   |
 
+## Keeping Local Clones Fresh
+
+**Fetch before you trust what you read.** Every repo here is a symlink to a
+sibling checkout that goes stale silently — nothing warns you that the file you
+just opened is months behind what is deployed. Reading a stale clone does not
+produce an obvious error; it produces a confident, wrong answer about how the
+running system behaves.
+
+This is not hypothetical. `gpu-container-uprez` was once found 60 commits and 11
+months behind `origin/main`. The local copy had no progress-reporting code at
+all, so the honest conclusion from reading it — "this container never reports
+progress" — was exactly backwards. The deployed image reports progress in four
+mapped phases.
+
+The `gpu-container-*` repos are the worst offenders: they are deployed from GHCR
+to RunPod, so what runs in production is whatever image was last pushed, which
+has no connection to what your working tree says. `video` and
+`electric-sheep-engine` are edited rarely enough that a checkout can sit
+untouched for a year.
+
+Survey drift across every repo (fetch is read-only and safe to run any time):
+
+```bash
+cd metarepo
+for d in */; do
+    [ -d "$d/.git" ] || [ -f "$d/.git" ] || continue
+    git -C "$d" fetch --quiet --all --prune 2>/dev/null
+done
+
+printf '%-24s %-7s %-6s %s\n' REPO BEHIND AHEAD BRANCH
+for d in */; do
+    [ -d "$d/.git" ] || [ -f "$d/.git" ] || continue
+    b=$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if up=$(git -C "$d" rev-parse --abbrev-ref '@{u}' 2>/dev/null); then
+        set -- $(git -C "$d" rev-list --left-right --count "$up"...HEAD 2>/dev/null)
+        printf '%-24s %-7s %-6s %s -> %s\n' "${d%/}" "$1" "$2" "$b" "$up"
+    else
+        printf '%-24s %-7s %-6s %s (no upstream)\n' "${d%/}" "?" "?" "$b"
+    fi
+done
+```
+
+Compare against `@{u}` (the branch's own upstream), not `origin/main`. Several
+repos sit on `stage` or a feature branch, where a behind-count against `main` is
+meaningless noise. `AHEAD > 0` means unpushed local commits — look before you
+pull.
+
+When an answer depends on what is actually deployed, `git fetch` and read
+`origin/main` directly (`git show origin/main:path/to/file`, `git grep -n pat
+origin/main`) rather than the working tree. That inspects the remote state
+without touching a checkout that may hold someone's in-progress work.
+
 ## Commands by Repository
 
 ### backend
