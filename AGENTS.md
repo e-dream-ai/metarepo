@@ -159,6 +159,37 @@ open client_generic/MacBuild/e-dream.xcodeproj
 
 The `.env` files in `backend/` and `frontend/` are pre-configured to point at **staging** services (AWS RDS Postgres at `edream-postgres-db-staging...`, Upstash Redis). No local Postgres/Redis is needed — both dev servers connect directly to staging. Make sure both repos are on the `stage` branch so code matches the data.
 
+### Migrations: pulling one does not mean running one
+
+**Do not run `pnpm run migration:run` locally as a reflex after `git pull`.**
+
+Because `backend/.env` points at the shared **staging** RDS (above), the database
+you connect to is the same one Heroku deploys against. Backend deploys on push to
+`stage`, so by the time a migration file reaches your working tree, that migration
+has almost always already been applied to staging by the deploy. Pulling the file
+gives you the *source* for a schema change the DB already has.
+
+Running it anyway is not a no-op you can shrug off: it is a write against shared
+staging that every other developer and the deployed stage frontend are also using.
+
+Your `.env` will not do it for you either — `TYPEORM_MIGRATIONS_RUN=false` and
+`TYPEORM_SYNCHRONIZE=false`, so the dev server never applies anything on startup.
+
+Check instead of assuming (read-only, ~30s, connects to staging):
+
+```bash
+cd backend && pnpm run migration:show   # [X] = applied, [ ] = pending
+```
+
+Only run `migration:run` when that shows a genuinely pending `[ ]` — normally just
+after *you* generated a migration that has not been deployed yet.
+
+**Corollary for schema questions:** an entity may carry indexes TypeORM refuses to
+manage, e.g. `@Index("IDX_USER_EMAIL_LOWER", { synchronize: false })` on
+`User.entity.ts` — a functional index on `lower(email)` that TypeORM cannot express.
+It exists *only* because a migration created it, and it is invisible to schema-sync
+tooling. Read `src/migrations/` for the real schema, not just the entities.
+
 ### Start both servers
 
 ```bash
