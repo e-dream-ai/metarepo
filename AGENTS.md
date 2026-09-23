@@ -139,6 +139,9 @@ cd backend  && pnpm run dev   # tsx watch, serves on :8080
 cd frontend && pnpm run dev   # vite, serves on :5173
 ```
 
+To bring both up and fast-forward whichever is on `stage`/`main` (leaving
+feature branches alone), use the `dev-up` skill.
+
 Frontend `.env` sets `VITE_BACKEND_URL=http://localhost:8080/api`, so the local frontend talks to the local backend.
 
 ### Healthy startup signals (grep these in logs)
