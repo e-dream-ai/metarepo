@@ -8,6 +8,11 @@ python-api/
 engines/
 electric-sheep-engine/
 client/
+gpu-container-ltx/
+gpu-container-nvidia-vsr/
+gpu-container-deforum/
+gpu-container-uprez/
+landing-page/
 
 # IDE
 .idea/
@@ -22,3 +27,6 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Claude Code: skills and rules are shared, machine-local settings are not
+.claude/settings.local.json
