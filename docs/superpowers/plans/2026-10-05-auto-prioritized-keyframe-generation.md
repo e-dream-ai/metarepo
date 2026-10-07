@@ -1,5 +1,14 @@
 # Auto-Prioritized Keyframe Video Generation — Implementation Plan
 
+> ⚠️ **SUPERSEDED — do not execute as-is.** This plan targets the earlier
+> **backend-internal** architecture (TypeORM in-process, `processDreamRequest`,
+> migration, Heroku script). The design has since moved to a **standalone `autogen`
+> repo** (Node/TS; own scheduled Heroku dyno; read-only shared-DB for signals; API
+> writes with the `infinidream` key; Redis for dedup) — see the v4 spec. The **pure
+> core (scoring/pairing/dedup/prompt) and its tests carry over verbatim**; the DB/queue
+> edges, migration, and scheduler tasks must be rewritten for the new repo. This plan
+> will be regenerated after the v4 spec is signed off.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A nightly backend job that ranks still image Dreams by engagement, pairs the most relevant ones (hub-and-spoke), and auto-enqueues LTX i2v generation between them — unattended, system-owned, visible immediately.
