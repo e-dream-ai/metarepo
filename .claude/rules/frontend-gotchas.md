@@ -21,7 +21,7 @@ These tables pre-rebut excuses for skipping steps that have caused real bugs in 
 |----------------|---------|
 | "I'll persist everything and filter on load." | A half-uploaded keyframe with a dead objectURL is a broken ghost card on reload. `partialize` must filter to settled records only. If it doesn't have a backend UUID, don't save it. |
 | "Persisting UI state (selected index, expanded panels) improves UX." | Persisted indices go stale when the underlying array changes. A `selectedTransitionIndex` of 3 after keyframes were deleted points at nothing. Persist data, not UI state. |
-| "I only need to reconcile generation status on rehydration." | If the store has parallel state machines (generation + uprez), reconciliation must cover all of them. Stale uprez jobs stuck in "processing" are just as broken as stale generation jobs. |
+| "I only need to reconcile generation status on rehydration." | If the store has parallel state machines (e.g. a clip and a derived job made from it), reconciliation must cover all of them. A stale derived job stuck in "processing" is just as broken as a stale generation job. |
 
 ### Before implementing API-calling hooks
 
