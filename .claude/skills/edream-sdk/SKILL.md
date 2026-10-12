@@ -30,7 +30,7 @@ See `python-api/src/edream_sdk/client/edream_client.py` for the client API (`cre
 | Wan I2V LoRA | `wan-i2v-lora`          | `prompt`, `image`, `high_noise_loras`, `low_noise_loras` |
 | Deforum      | `deforum`               | `0` (prompt), `max_frames`, `width`, `height`            |
 | AnimateDiff  | `animatediff`           | `prompts`, `frame_count`, `steps`                        |
-| Uprez        | `uprez`                 | `video_uuid`, `upscale_factor`, `interpolation_factor`   |
+| Enhance      | `enhance`               | `video_uuid`, `upscale_factor`, `interpolation_factor`   |
 
 ### Test Script
 

@@ -180,7 +180,7 @@ job:progress event → { status, progress (0-100), countdown_ms, preview_frame (
 | Frontend hook         | `frontend/src/api/dream/mutation/useGetDreamPreview.ts`             |
 | Progress broadcaster  | `backend/src/services/job-progress.service.ts`                      |
 
-Preview works for Deforum, Wan, Qwen, Uprez. Not yet implemented for AnimateDiff.
+Preview works for Deforum, Wan, Qwen, Enhance. Not yet implemented for AnimateDiff.
 
 ## Deployment
 
