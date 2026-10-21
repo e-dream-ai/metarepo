@@ -64,8 +64,10 @@ Heroku Scheduler (nightly, UTC) → one-off dyno: python -m autogen_engine → r
   2. template         — GET /v1/dream/:TEMPLATE_DREAM_UUID → base prompt (algo params)
   3. existing pairs   — GET playlist :PLAYLIST_UUID items → each item's prompt →
                         set of (source_dream_uuid,end_source_uuid) already made  [dedup + connectivity]
-  4. candidate pool   — GET /v1/feed?mediaType=image (paged) → image dreams WITH upvotes/
-                        downvotes AND playlistItems inline (no per-image call needed)
+  4. candidate pool   — GET /v1/feed?mediaType=image (paged) → image dreams w/ playlistItems,
+                        status, created_at (feed does NOT return votes or prompt);
+                        keep only status == processed (feed has no server-side status filter)
+  4b. votes           — GET /v1/dream/:uuid per candidate → upvotes/downvotes (nightly: OK)
   5. feature stand-in — GET /v1/feed/ranked → featured playlists' items → per-image feature
                         score by ORDER (numeric featureRank is stripped; list order is kept)
   6. popularity()     [pure]  votes + playlist-adds + recency + feature, scaled 0–1 + floor
@@ -84,8 +86,9 @@ Heroku Scheduler (nightly, UTC) → one-off dyno: python -m autogen_engine → r
 |------------|----------|--------|
 | In-flight guard | `GET /v1/dream?status=queue,processing` (own dreams) | **exists** |
 | Template prompt | `GET /v1/dream/:TEMPLATE_DREAM_UUID` | **exists** |
-| Existing pairs (state) | `GET /v1/playlist/:PLAYLIST_UUID/items` — items include each dream's `prompt` | **exists** (no follow-up calls) |
-| Candidate pool + signals | `GET /v1/feed?mediaType=image` (paged) — `upvotes`/`downvotes` **and** `playlistItems` inline | **exists** |
+| Existing pairs (state) | `GET /v1/playlist/:PLAYLIST_UUID/items` — items `leftJoinAndSelect` the full dream incl. `prompt` | **exists** (no follow-up calls) |
+| Candidate pool | `GET /v1/feed?mediaType=image` (paged) — returns `playlistItems`, `status`, `created_at`/`updated_at`, `user` (**not** votes, **not** prompt); filter to `status == processed` client-side | **exists** |
+| Votes per image | `GET /v1/dream/:uuid` — `upvotes`/`downvotes` | **exists** (one call/candidate, nightly) |
 | Feature stand-in | `GET /v1/feed/ranked` — featured playlists in `featureRank` order (numeric value stripped; order kept) | **exists** |
 | Create generation | `POST /v1/dream` | **exists, but requires `CREATOR_GROUP`** → `autogen` is a creator account |
 | Add to playlist | `POST /v1/playlist/:uuid/items` (atomic batch ≤500) | **exists** |
@@ -103,12 +106,29 @@ ranked-signals endpoint is deferred (the feed already carries the signals).
 | Signal | Source |
 |--------|--------|
 | playlist adds | feed returns each dream's `playlistItems` (count the array) |
-| upvotes / downvotes | **inline in the feed response** per dream (no per-image call) |
-| recency | dream `created_at`/`updated_at` |
+| upvotes / downvotes | per-image `GET /v1/dream/:uuid` (feed does **not** include votes) |
+| recency | dream `created_at`/`updated_at` (in the feed) |
 | featureRank (stand-in) | position in `/v1/feed/ranked` featured playlists → `1/(1+position)`; **0** if in none; keep weight low (coverage likely thin, mostly videos) |
 
 Reported images are **not** excluded. nsfw/hidden exclusion is whatever the feed returns for
 the calling user. Plays/watch-through deferred (client #691).
+
+### Candidate visibility — how `autogen` sees other users' dreams
+
+The main feed is a **global public gallery for any (non-admin) user**, not scoped to the
+caller. In `backend/src/utils/feed.util.ts`, `buildFeedConditions()` OR's two dream
+conditions for a non-admin: (1) `hidden: true` **AND `user = caller`** (your own unlisted
+items), and (2) `hidden: false` **with no `user` filter** — i.e. *everyone's* non-hidden
+dreams. So `autogen`, as an ordinary account, sees all other users' non-hidden image dreams;
+it need not own anything. Narrowing:
+
+- **`hidden: true`** on another user's dream → excluded (unlisted stays out). ✓
+- **`nsfw`** → excluded unless the `nsfw` option is set (leave it off). ✓
+- **`status`** → the feed applies **no** server-side status filter, so `autogen` must keep
+  only `status == processed` client-side (only finished stills are renderable i2v sources).
+- **`FeedItem` requirement** → a dream surfaces only if it has a `FeedItem` row (the feed
+  joins `FeedItem → dreamItem`). Any processed public image lacking one is invisible to the
+  pool — the dry run's reported pool size will expose any such gap.
 
 ## Selection — weighted lottery (pure)
 
@@ -198,8 +218,10 @@ exists for a creator account).
    images. (Reported images are *not* filtered per review — confirm that's intended.)
 3. **featureRank stand-in coverage** may be thin (featured playlists are mostly videos) —
    measure in the dry run; keep `W_FEATURE` low or drop it.
-4. **Feed pagination cost:** the candidate pool is paged from `/v1/feed?mediaType=image` with
-   votes/adds inline (no per-image calls) — bound the pages scanned per run for a large catalog.
+4. **API cost:** the pool is paged from `/v1/feed?mediaType=image` (adds + status inline), then
+   **one `GET /v1/dream/:uuid` per candidate** for votes. Fine nightly, but bound the pool
+   (cap pages / pre-filter by adds+recency before fetching votes) for a large catalog; a
+   future ranked-signals endpoint would remove the per-image fetch.
 5. **`edream_sdk` extensions** must not change behavior for existing SDK consumers (engines,
    video, electric-sheep-engine).
 

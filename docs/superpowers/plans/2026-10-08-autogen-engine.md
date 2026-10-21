@@ -304,8 +304,8 @@ def test_bounded_when_exhausted():
 
 **Interfaces:**
 - `ApiClient(backend_api, api_key)` wrapping an `edream_sdk` client for what it already supports and issuing raw authed requests (`Authorization: Api-Key <key>`) for the rest. Methods:
-  - `get_dream(uuid) -> dict` (template + any single dream)
-  - `list_image_dreams(take, skip) -> list[dict]` → `GET /v1/feed?mediaType=image` (each item has `upvotes`,`downvotes`,`playlistItems`,`prompt`,`user`,`created_at`)
+  - `get_dream(uuid) -> dict` (the template; also the **per-candidate votes** source — the feed omits votes, so fetch `upvotes`/`downvotes` here)
+  - `list_image_dreams(take, skip) -> list[dict]` → `GET /v1/feed?mediaType=image` (each item has `uuid`,`status`,`playlistItems`,`user`,`created_at`/`updated_at` — **no** votes, **no** prompt; the feed applies no server-side status filter, so the caller keeps only `status == "processed"`)
   - `ranked_playlists() -> list[dict]` → `GET /v1/feed/ranked` (featured playlists in order; read their items)
   - `inflight_count() -> int` → `GET /v1/dream?status=queue,processing` (own dreams)
   - `playlist_items(uuid) -> list[dict]` → `GET /v1/playlist/:uuid/items` (items include dream `prompt`)
@@ -327,7 +327,7 @@ def test_bounded_when_exhausted():
 **Files:** Create `autogen_engine/run.py`; Test `tests/test_run.py`.
 
 **Interfaces:**
-- `run(client, config, now, rng) -> RunSummary` — the data flow from the spec: in-flight guard → template fetch (fail-fast) → read playlist pairs (dedup `already` + `connected` counts) → page candidate image dreams → compute `feature_score` from `ranked_playlists()` order → `popularity()` → `draw_pairs()` → for each pair, unless `config.dry_run`: `build_ltx_i2v_prompt` → `create_dream` → collect uuid; batch `add_to_playlist` at the end. Returns `{pool, drawn, created, skipped_inflight: bool, dry_run: bool}`.
+- `run(client, config, now, rng) -> RunSummary` — the data flow from the spec: in-flight guard → template fetch (fail-fast) → read playlist pairs (dedup `already` + `connected` counts) → page candidate image dreams and **keep only `status == "processed"`** (the feed has no server-side status filter) → **fetch votes per candidate via `get_dream`** (the feed omits votes) → compute `feature_score` from `ranked_playlists()` order → assemble `ImageSignals` → `popularity()` → `draw_pairs()` → for each pair, unless `config.dry_run`: `build_ltx_i2v_prompt` → `create_dream` → collect uuid; batch `add_to_playlist` at the end. Returns `{pool, drawn, created, skipped_inflight: bool, dry_run: bool}`.
 - A `create_dream` failure for one pair is caught, logged, counted; the run continues. A template-fetch failure raises (fail-fast, before any creates).
 
 - [ ] **Step 1: Write failing tests** with a fake client:
@@ -335,6 +335,7 @@ def test_bounded_when_exhausted():
   - empty candidate pool → `drawn=0`, no throw;
   - dry-run → `create_dream`/`add_to_playlist` never called; `drawn>0`;
   - all pairs already in playlist → `created=0`;
+  - non-`processed` images are dropped from the pool (feed returns `queue`/`failed` too);
   - happy path (dry_run false, cap 2) → exactly 2 creates, all added to the playlist once;
   - template fetch raises → `run` raises, no creates;
   - one create raises → run continues, `created` counts the successes.
