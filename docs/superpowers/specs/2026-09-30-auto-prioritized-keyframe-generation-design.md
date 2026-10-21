@@ -1,281 +1,187 @@
 # Auto-Prioritized Keyframe Video Generation — Design
 
-**Date:** 2026-09-30 (revised 2026-10-05, v4 — standalone `autogen` service)
-**Status:** Design — reviewed vs `origin/stage`; re-architected as a standalone app per review
-**Home:** new **`autogen`** repo (Node/TypeScript). Design doc lives in metarepo until the repo exists.
+**Date:** 2026-09-30 (revised 2026-10-08, v5 — API-only `autogen-engine`, per Spot review)
+**Status:** Design — adopting PR #1 review feedback
+**Home:** new **`autogen-engine`** repo (Node/TypeScript). Design doc lives in metarepo until the repo exists.
 
-> **Revision note (v4) — standalone service.** Earlier versions put this inside the
-> backend. Per Spot's review it becomes its **own `autogen` repo** that eventually
-> graduates into one of the editor-platform "apps." Consequences, all confirmed by a
-> read of `origin/stage`:
-> - Backend is **web/WebSocket only** — no BullMQ Worker, no scheduler; crons are
->   external (Heroku Scheduler). The worker repo has **no DB access**. So there is no
->   in-backend home for a scheduled generator anyway.
-> - `autogen` runs as its **own Heroku app** on a **Heroku Scheduler one-off dyno**
->   nightly (spins up, runs, exits — no always-on cost).
-> - **Signals + template + dream-status: direct read** from the shared Postgres
->   (read-only role). **Generation: API write** — `POST /v1/dream` with the curation
->   account's `Api-Key` (so output is owned by that account for free, exactly like the
->   SDK/flow builder). **No backend endpoint or migration needed for v1.**
-> - **Dedup + in-flight state: existing Upstash Redis** (namespaced `autogen:*`) — no
->   new datastore.
-> - **BullMQ scheduled/child jobs: considered and dropped** — a once-nightly one-off
->   dyno is simpler, and the worker repo (the only process with BullMQ Workers) has no
->   DB access to create Dreams anyway.
-> - **Plays / % played-through: separate upstream workstream** (see Deferred).
-> - The **pure core is unchanged** from v3 (scoring, pairing, dedup, prompt). Only the
->   two impure edges moved: DB-read instead of TypeORM-in-process; API-create instead
->   of `processDreamRequest`.
+> **Revision note (v5) — API-only, à la `electric-sheep-engine`.** Spot's PR #1 review
+> replaced the direct-DB/Redis design with one that runs as an **ordinary user account
+> through the public API**. Changes from v4:
+> - **Repo:** `autogen-engine` (Node/TS). Talks **only to the backend HTTP API** — no
+>   direct DB, no admin role, no Redis.
+> - **Auth:** regular (non-admin) **curation user** API key, header
+>   **`Authorization: Api-Key <key>`** (v4 wrongly said `Api-Key: <key>`). The backend's
+>   `HeaderAPIKeyStrategy` uses prefix `"Api-Key "` (`backend/src/clients/passport.client.ts`);
+>   `edream_sdk` and `worker/src/marketing-cli.ts` already send exactly this from
+>   Node — but there is **no JS/TS SDK**, so `autogen-engine` ships a small typed client.
+> - **Template = a dream, not a flow project.** `TEMPLATE_DREAM_UUID` → `GET /v1/dream/:uuid`
+>   returns its `prompt`; copy it, force `infinidream_algorithm:"ltx-i2v"`, set new
+>   `source_dream_uuid`/`end_source_uuid`, `POST /v1/dream`. Drop `EditorProject`/transition-key.
+> - **State lives in the output playlist, not Redis.** `PLAYLIST_UUID`; every generated
+>   dream is added to it; at run start read the playlist's items' prompts — the
+>   `(source_dream_uuid, end_source_uuid)` pairs there are both the **dedup** set and the
+>   **connectivity** signal. Remove a video from the playlist = manual "redo". No Redis,
+>   no TTLs; cooldown/score-rise dropped for v1.
+> - **Selection: weighted lottery** (see §Selection) instead of hub-and-spoke.
+> - **Signals via API only;** `featureRank` is stripped for non-admins — approximate via
+>   `/v1/feed/ranked` position (low weight; coverage may be thin).
+> - **Input filter:** all processed image dreams from any source; nsfw/hidden come from
+>   the feed as the calling user sees it; **do not** exclude reported images.
+> - **This plan also builds the initial backend APIs** `autogen-engine` needs (any
+>   feed/dream/playlist capability not already exposed to a regular user) — see Plan.
+> - **Deferred signal:** client [issue #691](https://github.com/e-dream-ai/client/issues/691)
+>   (report end-of-playback: how far through + skipped vs. finished) replaces the vaguer
+>   "% played-through."
 
-> **Terminology.** A "keyframe" here means **a still image Dream used as an i2v source
-> or target** — a `Dream` row with `mediaType = "image"`, not the `Keyframe` entity
-> (flow `Keyframe` rows carry no image and cannot drive generation).
+> **Terminology.** A "keyframe" here = **a still image Dream used as an i2v source/target**
+> (`mediaType = "image"`), not the `Keyframe` entity.
 
 ## Purpose
 
-Grow the platform's video library unattended. A nightly job ranks still image Dreams
-by engagement, pairs the most relevant ones (hub-and-spoke), and creates LTX i2v
-generations between them via the backend API — no human clicks "Generate." Popular
-images spawn many varied videos by being paired with several partners.
-
-## Intent (agreed brief)
-
-- **Outcome:** auto-fill the content library, unattended.
-- **Home/stack:** standalone **`autogen`** repo, **Node/TypeScript**.
-- **Run target:** own Heroku app, **Heroku Scheduler** one-off dyno, nightly (UTC).
-- **Unit of relevance:** still **image Dream** (`mediaType = "image"`), scored by its
-  direct engagement signals.
-- **Primitive:** LTX i2v between two image Dreams — `source_dream_uuid` (start) +
-  `end_source_uuid` (end) in an `ltx-i2v` prompt, created via `POST /v1/dream`.
-- **Template:** generation settings come from a designated **flow `EditorProject`
-  transition**, read from `EditorProject.state` (model pinned to `ltx-i2v`).
-- **Signals (v1):** upvotes/downvotes, playlist adds, featureRank, recency — read
-  directly from Postgres. Plays/playthroughs deferred.
-- **Pairing:** hub-and-spoke.
-- **Dedup:** cooldown + score-rise override, keyed `(start, end, template)`, in Redis.
-- **Ownership:** the **`infinidream` curation account** (whose API key `autogen`
-  uses). Auto-generated dreams are therefore identified simply by *creator =
-  `infinidream`* — **no `autoGenerated` flag is ever needed.** Visible immediately.
-
-## Integration edges (the only backend-coupled parts)
-
-| Edge | Mechanism | Notes |
-|------|-----------|-------|
-| Read engagement signals | **Direct SQL**, read-only Postgres role | image Dreams + aggregates; see Signals |
-| Read the flow-app template | **Direct SQL** — `EditorProject.state` jsonb | by `AUTO_GEN_TEMPLATE_PROJECT_UUID` |
-| In-flight guard | **Direct SQL** — count Dreams where `creator = infinidream` and status ∈ {queue, processing} | identity by owner; no flag, no Redis set |
-| Create a generation | **`POST /v1/dream`** with `infinidream` `Api-Key` | owner = `infinidream`; same payload the flow builder sends |
-| Dedup state | **Redis** (existing Upstash), keys `autogen:dedup:*` | no shared-DB writes |
-
-`autogen` **never writes to the shared Postgres.** Its only write surface is the
-backend API and its own Redis keys. This keeps the repo boundary clean and means a
-read-only DB credential suffices.
-
-## Signals — direct read from `Dream` (verified on `origin/stage`)
-
-`backend/src/entities/Dream.entity.ts`: `mediaType` (line 81), `upvotes`/`downvotes`
-(149/152), `playlistItems` OneToMany (157), `featureRank` (133), `reports` (238),
-`nsfw`/`hidden`, `created_at`/`updated_at`. Owner via the `user` relation (`user.uuid`).
-
-`autogen`'s read query selects image Dreams (`mediaType = 'image'`, status
-`processed`), **excludes** `nsfw`, `hidden`, any `Report`, and **soft-deleted owners**
-(explicit `user.deleted_at IS NULL` on the joined User — TypeORM's auto soft-delete
-filter does not apply here since `autogen` issues raw SQL / a read client, and in any
-case not to joined relations). Projects `netVotes = upvotes - downvotes`,
-`playlistCount`, `featureRank`, `updatedAt`, `ownerUuid`.
+Grow the library unattended. A nightly job ranks still image dreams by engagement, draws
+pairs via a weighted lottery biased toward already-connected images, and creates LTX i2v
+videos between them through the public API — owned by the curation account, added to one
+output playlist, visible immediately.
 
 ## Architecture
 
+`autogen-engine` is a standalone Node/TS service on its **own Heroku app**, run by
+**Heroku Scheduler** on a one-off dyno nightly (UTC). It holds **no persistent state of its
+own** — all state is the backend's (the output playlist and the dreams themselves). It is a
+thin client over a handful of API endpoints plus the pure selection logic.
+
 ```
-Heroku Scheduler (nightly, UTC)
-  → one-off dyno: `node dist/index.js`
-    → run(deps, config, now):
-        in-flight guard  — SQL COUNT Dreams(creator=infinidream, status in queue|processing);
-                            skip run if that count > MAX_INFLIGHT_AUTO_JOBS
-        load template    — SELECT EditorProject.state (SQL) → TemplateSettings (pin ltx-i2v)
-        read signals     — SELECT image Dreams + aggregates (SQL, safety-filtered)
-        scoreImageDreams()  [pure]
-        buildCandidates()   [pure]  hub-and-spoke
-        for each candidate (top pairScore first, until MAX_JOBS_PER_RUN):
-            prior = Redis GET autogen:dedup:<triple>
-            if shouldGenerate(candidate, prior, cfg, now)  [pure]:
-                prompt = buildLtxI2vPrompt(settings, start, end)  [pure]
-                POST /v1/dream (infinidream Api-Key)   → dreamUuid
-                Redis SET autogen:dedup:<triple> {maxScore,createdAt,dreamUuid}
-        log run summary (scored/paired/generated/skippedDedup/skippedGuard)
-    → exit 0
+Heroku Scheduler (nightly, UTC) → one-off dyno: node dist/index.js → run():
+  1. in-flight guard  — GET /v1/dream/my-dreams?status=queue,processing (as curation user);
+                        skip run if count > MAX_INFLIGHT
+  2. template         — GET /v1/dream/:TEMPLATE_DREAM_UUID → base prompt (algo params)
+  3. existing pairs   — GET playlist :PLAYLIST_UUID items → each item's prompt →
+                        set of (source_dream_uuid,end_source_uuid) already made  [dedup + connectivity]
+  4. candidate pool   — GET /v1/feed?mediaType=image (paged) → image dreams + playlistItems;
+                        votes per image via GET /v1/dream/:uuid (nightly, one call each is fine)
+  5. feature stand-in — GET /v1/feed/ranked → featured playlists' items → per-image feature score
+  6. popularity()     [pure]  votes + playlist-adds + recency + feature, scaled 0–1 + floor
+  7. drawPairs()      [pure]  weighted lottery, N draws, bias by connectivity k, skip self/dup
+  8. for each drawn pair (unless DRY_RUN):
+        prompt = buildLtxI2vPrompt(templatePrompt, start, end)   [pure]
+        POST /v1/dream (Authorization: Api-Key)  → dreamUuid
+        add dreamUuid to PLAYLIST_UUID
+  9. log run summary (pool / drawn / created / skipped)
+  → exit 0
 ```
 
-Modules (new repo):
+## Integration edges (all public API; `Authorization: Api-Key <key>`)
 
-| Module | Kind | Responsibility |
-|--------|------|----------------|
-| `src/index.ts` | entrypoint | init config + clients, `run()` once, exit |
-| `src/run.ts` | impure shell | orchestration with an injected `deps` gateway |
-| `src/scoring.ts` | **pure** | `scoreImageDreams(signals, weights, halfLifeDays, now)` |
-| `src/pairing.ts` | **pure** | `buildCandidates(scored, cfg)` (hub-and-spoke) |
-| `src/dedup.ts` | **pure** | `shouldGenerate(candidate, priorRows, cfg, now)` |
-| `src/prompt.ts` | **pure** | `buildLtxI2vPrompt(settings, start, end)` |
-| `src/db.ts` | edge | read-only Postgres client: signals, template, in-flight count (creator=infinidream) |
-| `src/api.ts` | edge | backend API client: `POST /v1/dream` with `infinidream` `Api-Key` |
-| `src/store.ts` | edge | Redis: dedup get/set (`autogen:dedup:*`) |
-| `src/config.ts` | config | env → typed config |
+| Capability | Endpoint (intended) | Notes |
+|------------|--------------------|-------|
+| In-flight guard | `GET /v1/dream/my-dreams?status=queue,processing` | count as the curation user |
+| Template prompt | `GET /v1/dream/:TEMPLATE_DREAM_UUID` | copy `prompt`, force ltx-i2v |
+| Existing pairs (state) | read `PLAYLIST_UUID` items + their prompts | dedup + connectivity |
+| Candidate pool + signals | `GET /v1/feed?mediaType=image` (paged) | playlistItems inline; votes per-dream |
+| Votes per image | `GET /v1/dream/:uuid` | one call/image, nightly — acceptable |
+| Feature stand-in | `GET /v1/feed/ranked` | featured playlists → position → score |
+| Create generation | `POST /v1/dream` | owner = curation account |
+| Add to playlist | add-item endpoint | every generated dream |
 
-## Pure core (unchanged from v3)
+The exact exists-vs-build status of each endpoint is settled in the Plan; capabilities not
+already exposed to a regular user are **built as initial backend APIs** as part of this work.
 
-**Scoring** — per-run min-max normalize each term to [0,1] then weight; clamp
-`netVotes ≥ 0`; recency `exp(-ageDays/halfLifeDays)`; inject `now`. v1 weights bias to
-`featureRank` + recency (stills accrue few votes; they *are* public/votable — there is
-a `STILLS` feed — but thinner-signal than videos).
+## Signals (what a regular user can see)
 
-**Pairing** — hubs = top `hubsPerRun`; each hub gets `spokesPerHub` partners (quality
-picks + deterministic diversity: lowest-scored of a different owner, tie-break uuid;
-fall back to quality if same-owner); skip `start==end`; dedupe ordered pairs and (when
-`!bothDirections`) their reverse; sort by `pairScore = score(start)+score(end)`.
+| Signal | Source |
+|--------|--------|
+| playlist adds | feed returns each dream's `playlistItems` |
+| upvotes / downvotes | `GET /v1/dream/:uuid` |
+| recency | dream `created_at`/`updated_at` |
+| featureRank (stand-in) | position in `/v1/feed/ranked` featured playlists → `1/(1+position)`; **0** if in none; keep weight low (coverage likely thin, mostly videos) |
 
-**Dedup predicate** — `shouldGenerate(candidate, priorRows, cfg, now)`: generate if no
-prior; or newest prior older than `cooldownDays`; or `pairScore ≥ (1+pct/100) × max(prior
-pairScore)`. `priorRows` has 0 or 1 entry (Redis stores one aggregate per triple).
+Reported images are **not** excluded. nsfw/hidden exclusion is whatever the feed returns for
+the calling user. Plays/watch-through deferred (client #691).
 
-**Prompt** — `buildLtxI2vPrompt`: always `infinidream_algorithm:"ltx-i2v"`, `prompt`,
-`source_dream_uuid`, `end_source_uuid`, `duration`; optional `negative_prompt`,
-`high_noise_loras` (whole array), `seed`, `guidance` (`GUIDANCE_PARAM["ltx-i2v"]==="guidance"`).
+## Selection — weighted lottery (pure)
 
-## Dedup in Redis; in-flight from the DB
+For the candidate images `d`:
 
-- **Dedup key:** `autogen:dedup:<startUuid>:<endUuid>:<templateRef>` → JSON
-  `{ maxPairScore, createdAt, dreamUuid }`. On (re)generate, write/update it. A long
-  safety TTL (e.g. `2 × cooldownDays`) bounds growth; the **cooldown logic stays in the
-  pure predicate** (it reads `createdAt`), so Redis TTL is cleanup, not logic.
-- **In-flight guard (no Redis):** a SQL `COUNT` of Dreams whose creator is the
-  `infinidream` account with status in {`queue`, `processing`}. Because every
-  auto-generated dream is owned by `infinidream`, ownership *is* the marker — no Redis
-  in-flight set, no `Dream.autoGenerated` column, and the count is correct across dyno
-  restarts.
+1. `popularity(d)` = weighted sum of `votes`, `playlistAdds`, `recency`, `feature`, each
+   min-max scaled to [0,1] within the run, **plus a small floor** so every image has a
+   chance.
+2. `connected(d)` = how many times `d` already appears as a start or end in the output
+   playlist's pairs.
+3. `w(d) = popularity(d) × (1 + k · connected(d))`.
+4. For each of `N` draws: pick a start and an end with probability ∝ `w`. **Redraw** if
+   `start == end` or the `(start,end)` pair is already in the playlist.
 
-**Dedup is the only thing in Redis.** Signals, template, and the in-flight count are
-SQL; generation is the API. So the Redis footprint is just one small key per generated
-triple:
+`k` biases toward images already used, so videos link into a connected graph; the floor +
+randomness give long-tail images a chance (this replaces the v4 "lowest-scored
+different-owner" diversity pick). Tunables: `N` (`JOBS_PER_RUN`), `k` (`CONNECTIVITY_K`),
+signal weights, `HALF_LIFE_DAYS`.
 
-- **Key count** ≤ `MAX_JOBS_PER_RUN`/run; with TTL `2 × COOLDOWN_DAYS` (60 d) the
-  always-at-cap ceiling is ~50 × 60 = **~3,000 keys** (cooldown suppression makes the
-  real number far lower).
-- **~400 B/key** (key ~200 B + JSON value ~90 B + Redis overhead ~100 B) →
-  **~1.2 MB total**, ~12 MB even at 10× volume. Negligible on the shared Upstash
-  instance; TTL bounds growth.
+**Purity/determinism:** the draw takes an **injected RNG** (seedable) so tests are
+deterministic; production seeds from the clock at run start.
 
-(Considered and rejected: deriving dedup from the DB — querying `infinidream`-owned
-dreams by their prompt's source/end uuids — to drop Redis entirely. It needs awkward
-JSON-column queries and has nowhere to store the `pairScore` the score-rise override
-compares against. Redis is simpler and effectively free here.)
+## Prompt building (pure)
 
-## Template — a designated `EditorProject` transition (read via SQL)
+`buildLtxI2vPrompt(templatePrompt, startUuid, endUuid)`: start from the template dream's
+`prompt` object, force `infinidream_algorithm: "ltx-i2v"`, set `source_dream_uuid = start`
+and `end_source_uuid = end`, and leave the template's other params (prompt text, duration,
+guidance, loras, seed) intact. (The worker reads guidance as `guidance` and uses
+`high_noise_loras[0]`.)
 
-`autogen` SELECTs `EditorProject.state` (jsonb) by `AUTO_GEN_TEMPLATE_PROJECT_UUID`.
-State shape (frontend `editor-project-state.ts`): `{ referenceFrames, transitions }`,
-`transitions` keyed `"fromId::toId"`, settings at `transitions[key].settings`
-(`TransitionSettings = {prompt,negativePrompt,duration,model,steps,guidance,seed,
-highNoiseLoras,lowNoiseLoras}`). Default key (if `AUTO_GEN_TEMPLATE_TRANSITION_KEY`
-unset) = `` `${referenceFrames[0].id}::${referenceFrames[1].id}` `` (frame order, not
-object-key order). `model` is ignored — pinned to `ltx-i2v`. **The template author must
-use LTX-appropriate LoRAs or none** (stored default model is `kling-25-i2v`; LoRAs pass
-through unchecked).
+## Dedup & in-flight (no extra storage)
 
-## Generation via API
+- **Dedup = the output playlist.** The set of `(source,end)` pairs already present (from step
+  3) is the dedup set; a drawn pair in that set is redrawn. Delete a dream from the playlist
+  to allow its pair to regenerate (manual redo). No cooldown/score-rise in v1.
+- **In-flight guard = `my-dreams`.** Count the curation account's `queue`/`processing`
+  dreams via the API; skip the run if over `MAX_INFLIGHT`.
 
-`POST {BACKEND_API}/v1/dream` with header `Api-Key: <curation key>`, body the
-`buildLtxI2vPrompt` payload (plus a generated `name`). The response dream uuid is tracked
-in Redis. This is the same create path the flow builder uses, so no backend change is
-required. The curation account owns the result and it is visible immediately.
+## Config
 
-## Config / env
+`BACKEND_API`, `API_KEY`, `TEMPLATE_DREAM_UUID`, `PLAYLIST_UUID`, `DRY_RUN` (default `true`),
+`JOBS_PER_RUN`, `CONNECTIVITY_K`, signal weights (`W_VOTES`/`W_PLAYLIST`/`W_RECENCY`/`W_FEATURE`),
+`HALF_LIFE_DAYS`, `MAX_INFLIGHT`. (Removed from v4: `DATABASE_URL_RO`, `REDIS_URL`,
+`CURATION_USER_UUID`, template project/transition keys.) Entry requires `BACKEND_API`,
+`API_KEY`, `TEMPLATE_DREAM_UUID`, `PLAYLIST_UUID` or it exits non-zero without creating anything.
 
-| Env | Default | Purpose |
-|-----|---------|---------|
-| `DATABASE_URL_RO` | — | read-only Postgres connection (shared DB) |
-| `REDIS_URL` | — | existing Upstash Redis |
-| `BACKEND_API` | — | e.g. `https://api-stage.infinidream.ai/api` |
-| `CURATION_API_KEY` | — | the `infinidream` account's API key (owner of output) |
-| `CURATION_USER_UUID` | — | `infinidream`'s user uuid, for the in-flight COUNT query |
-| `AUTO_GEN_TEMPLATE_PROJECT_UUID` | — | the flow `EditorProject` template |
-| `AUTO_GEN_TEMPLATE_TRANSITION_KEY` | first | transition within the template |
-| `AUTO_GEN_DRY_RUN` | `true` | compute + log candidates, create nothing (rollout gate) |
-| `MAX_JOBS_PER_RUN` | 50 | hard ceiling per run |
-| `HUBS_PER_RUN` / `SPOKES_PER_HUB` / `DIVERSITY_RATIO` | 10 / 3 / ⅓ | pairing |
-| `COOLDOWN_DAYS` / `REGEN_SCORE_RISE_PCT` | 30 / 50 | dedup |
-| `MAX_INFLIGHT_AUTO_JOBS` | 100 | queue-pressure guard |
-| `HALF_LIFE_DAYS` | 30 | recency decay |
-| weights `W_VOTES/W_PLAYLIST/W_FEATURE/W_RECENCY` | 1/2/4/3 | scoring |
+## Deployment & rollout
 
-Entrypoint requires `DATABASE_URL_RO`, `REDIS_URL`, `BACKEND_API`, `CURATION_API_KEY`,
-`AUTO_GEN_TEMPLATE_PROJECT_UUID`, or it exits non-zero without creating anything.
-
-## Deployment & run
-
-- **Heroku app `autogen`**, no web dyno. **Heroku Scheduler** add-on runs
-  `node dist/index.js` nightly (UTC). One-off dyno — ephemeral FS is fine because all
-  state is in Redis / the shared DB.
-- **Postgres:** attach the shared DB with a **read-only role**; `autogen` never writes
-  it. **Redis:** the existing Upstash instance (shared), keys namespaced `autogen:`.
-- **Curation account:** created once (seed/admin); its API key → `CURATION_API_KEY`.
-- CI: lint + `jest`; build `tsc`. Deploy on push (Heroku) — no always-on process to
-  health-check.
-
-## Rollout (staged, each a config flip)
-
-1. **Dry-run** (`AUTO_GEN_DRY_RUN=true`, default): run nightly, score/pair/log
-   candidates and intended prompts, create **nothing**. Validate ranking + pairs.
-2. **Capped live**: `AUTO_GEN_DRY_RUN=false`, `MAX_JOBS_PER_RUN=2`; eyeball the
-   generated videos under the curation account.
-3. **Full**: raise `MAX_JOBS_PER_RUN`; leave on the nightly schedule.
-
-## Migration / bring-up plan (backend-light)
-
-1. **No shared-DB migration, no backend code change for v1.** Generation uses the
-   existing `POST /v1/dream`; dedup lives in Redis; auto-gen identity is simply
-   *creator = `infinidream`* (no marker column needed, now or later).
-2. **Prereqs:** (a) the **`infinidream` curation account** exists + issue its API key,
-   and record its user uuid; (b) create the **read-only DB role**; (c) author the
-   **template flow** (an `EditorProject` with an ltx-i2v-appropriate transition) and
-   record its uuid.
-3. **Stand up** the `autogen` repo + Heroku app + Scheduler, config the env, deploy in
-   **dry-run**, confirm the summary/log, then walk the rollout stages.
-4. **Graduation to an app (later):** swap the direct DB read for a backend
-   ranked-signals endpoint when one exists; the pure core and API-write path are
-   unchanged. The `autogenerated` marker + a plays signal can land then.
+- **Heroku app `autogen-engine`**, no web dyno; **Heroku Scheduler** runs `node dist/index.js`
+  nightly (UTC). One-off dyno; no persistent local state (ephemeral FS is fine).
+- **Rollout (config flips):** (1) **dry-run** (default) — score/draw/log, create nothing;
+  (2) **capped live** — `DRY_RUN=false`, `JOBS_PER_RUN=2`, eyeball the curation account's
+  output; (3) **full** — raise `JOBS_PER_RUN`, leave on schedule.
 
 ## Testing
 
-- **Pure** (`scoring`, `pairing`, `dedup`, `prompt`): full unit tests (as v3) — ranking,
-  normalization, clamp, recency, hub/spoke counts, deterministic diversity, dedup
-  cooldown/score-rise, prompt fields. Deterministic with injected `now`.
-- **`run.ts`** (orchestration): unit-tested with a fake `deps` gateway — guard skip,
-  caps, dedup skip, empty set, API-failure continues, template-load fail-fast, dry-run
-  creates nothing.
-- **Edges** (`db`/`api`/`store`): thin; test with mocked pg/axios/redis — the DB query
-  shape (safety filters incl. joined `user.deleted_at IS NULL`), the API payload +
-  `Api-Key` header, and Redis dedup get/set + in-flight prune. Dreams are not stood up
-  for real.
+- **Pure** (`popularity`, `drawPairs`, `buildLtxI2vPrompt`): unit tests — scaling + floor,
+  connectivity weighting, redraw on self/dup/already-made, N honored, deterministic with an
+  injected RNG; prompt forces ltx-i2v + sets source/end and preserves template params.
+- **`run()` orchestration:** unit-tested with a fake API client — in-flight guard skip, dry-run
+  creates nothing, dedup against playlist, caps, template-fetch fail-fast, each created dream
+  added to the playlist.
+- **API client + any new backend endpoints:** backend endpoint tests follow the repo's
+  existing controller-test pattern; the `autogen-engine` client is tested with a mocked HTTP
+  layer (correct `Authorization: Api-Key` header, request/response shapes).
 
 ## Risks / open decisions
 
-1. **Curation account** provisioning + its license flags; its API key handling.
-2. **Content-safety sign-off**: instantly-public, curation-owned video generated from
-   other users' images (input gate excludes nsfw/hidden/reported/soft-deleted-owner).
-3. **Read-only DB coupling**: `autogen` reads backend table shapes directly; a backend
-   schema change could break its query. Mitigated by narrow SELECTs and the planned
-   graduation to a backend signals endpoint.
-4. **Shared Redis namespace**: keys must be `autogen:`-prefixed to avoid BullMQ
-   collisions on the shared instance.
+1. **Curation account** (regular user) provisioning + its API key; the output `PLAYLIST_UUID`
+   and the `TEMPLATE_DREAM_UUID` (an existing ltx-i2v dream) must be created/recorded.
+2. **Content-safety sign-off**: curation-owned, instantly-public video from other users'
+   images. (Reported images are *not* filtered per review — confirm that's intended.)
+3. **featureRank stand-in coverage** may be thin (featured playlists are mostly videos) —
+   measure in the dry run; keep `W_FEATURE` low or drop it.
+4. **API cost:** one `GET /v1/dream/:uuid` per candidate image for votes — fine nightly, but
+   if the pool is large consider a feed field or a batch endpoint (a Plan decision).
+5. **Backend API additions** (step 8 of the Plan) must not regress existing feed/dream
+   behavior for other callers.
 
 ## Deferred / future
 
-- **% played-through signal** — its own upstream workstream: the C++ client already has
-  a `SendTelemetry()` path and the backend `/api/v1/client/telemetry` endpoint exists but
-  is a **no-op**; capture = client emits percent + backend persists to a `PlaybackEvent`
-  table + aggregation, then `autogen` adds a `w_plays` term. Powerful quality signal,
-  but cross-repo and independent of `autogen` v1.
-- Backend **ranked-signals endpoint** (replaces direct DB read at graduation).
-- Curated **set** of template transitions rotated for variety (dedup key already carries
-  the template ref).
-- Retry of failed auto-generations; transitions beyond hub-and-spoke.
+- **Watch-through signal** — client [issue #691](https://github.com/e-dream-ai/client/issues/691):
+  report how far a dream was watched + skipped-vs-finished. Strongest quality signal; once
+  captured and exposed via the API, add a `plays` term to `popularity(d)`.
+- Backend **ranked-signals endpoint** that returns the candidate pool + votes in one call
+  (removes the per-image vote fetch).
+- Re-generation policy (cooldown/score-rise) if manual playlist-removal proves insufficient.
+- A JS/TS SDK (if more Node services appear).
