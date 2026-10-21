@@ -121,6 +121,12 @@ def test_defaults():
     assert c.connectivity_k == 1.0
     assert c.max_inflight == 100
     assert c.half_life_days == 30
+    # politeness defaults
+    assert c.startup_jitter_seconds == 300
+    assert c.max_rps == 3.0
+    assert c.shortlist_size == 200
+    assert c.max_feed_pages == 20
+    assert c.retry_max == 4
     # featureRank weight kept low by default (thin coverage)
     assert c.weights["feature"] <= c.weights["votes"]
 
@@ -159,6 +165,12 @@ class Config:
     connectivity_k: float = 1.0
     half_life_days: float = 30.0
     max_inflight: int = 100
+    # politeness / load management
+    startup_jitter_seconds: int = 300
+    max_rps: float = 3.0
+    shortlist_size: int = 200
+    max_feed_pages: int = 20
+    retry_max: int = 4
     weights: dict = field(default_factory=lambda: {
         "votes": 1.0, "playlist": 2.0, "recency": 3.0, "feature": 1.0,
     })
@@ -175,6 +187,11 @@ def load_config(env: Mapping[str, str]) -> Config:
         connectivity_k=_num(env, "CONNECTIVITY_K", 1.0),
         half_life_days=_num(env, "HALF_LIFE_DAYS", 30.0),
         max_inflight=_num(env, "MAX_INFLIGHT", 100),
+        startup_jitter_seconds=_num(env, "STARTUP_JITTER_SECONDS", 300),
+        max_rps=_num(env, "MAX_RPS", 3.0),
+        shortlist_size=_num(env, "SHORTLIST_SIZE", 200),
+        max_feed_pages=_num(env, "MAX_FEED_PAGES", 20),
+        retry_max=_num(env, "RETRY_MAX", 4),
         weights={
             "votes": _num(env, "W_VOTES", 1.0), "playlist": _num(env, "W_PLAYLIST", 2.0),
             "recency": _num(env, "W_RECENCY", 3.0), "feature": _num(env, "W_FEATURE", 1.0),
@@ -298,12 +315,35 @@ def test_bounded_when_exhausted():
 
 ---
 
+### Task B4b: Rate limiter + retry/backoff (injected clock + sleep)
+
+**Files:** Create `autogen_engine/limiter.py`; Test `tests/test_limiter.py`.
+
+**Interfaces:**
+- `RateLimiter(max_rps, now_fn, sleep_fn)` with `.acquire()` — a token-bucket / min-interval
+  pacer that `sleep_fn`s enough to keep calls ≤ `max_rps` and sequential. `now_fn`/`sleep_fn`
+  are injected so tests are deterministic (no real wall clock).
+- `retry(fn, retry_max, sleep_fn, rng, is_retryable, retry_after_fn)` — calls `fn`; on a
+  retryable error (HTTP 429/5xx) sleeps `min(base*2**attempt, cap) + rng.random()*jitter`
+  (honoring `Retry-After` when present) up to `retry_max`, then re-raises. Never hot-loops.
+
+- [ ] **Step 1: Write failing tests** — limiter: N rapid `.acquire()` calls accumulate the
+  expected total `sleep_fn` time for a given `max_rps`; retry: retryable error retries up to
+  `retry_max` then raises, non-retryable raises immediately, `Retry-After` is honored, and
+  backoff grows (assert the recorded sleep sequence with a seeded `rng` + fake `sleep_fn`).
+- [ ] **Step 2: Run → fail.**
+- [ ] **Step 3: Implement** `limiter.py` (pure logic; all time/sleep/rng injected).
+- [ ] **Step 4: Run → pass.**
+- [ ] **Step 5: Commit** `feat: injected-clock rate limiter + retry/backoff`.
+
+---
+
 ### Task B5: API client (reuse `edream_sdk` + wrap missing endpoints)
 
 **Files:** Create `autogen_engine/client.py`; Test `tests/test_client.py`.
 
 **Interfaces:**
-- `ApiClient(backend_api, api_key)` wrapping an `edream_sdk` client for what it already supports and issuing raw authed requests (`Authorization: Api-Key <key>`) for the rest. Methods:
+- `ApiClient(backend_api, api_key, limiter)` wrapping an `edream_sdk` client for what it already supports and issuing raw authed requests (`Authorization: Api-Key <key>`) for the rest. **Every** request goes through `limiter.acquire()` + `retry(...)` (Task B4b) so all traffic is paced and backs off on 429/5xx. Methods:
   - `get_dream(uuid) -> dict` (the template; also the **per-candidate votes** source — the feed omits votes, so fetch `upvotes`/`downvotes` here)
   - `list_image_dreams(take, skip) -> list[dict]` → `GET /v1/feed?mediaType=image` (each item has `uuid`,`status`,`playlistItems`,`user`,`created_at`/`updated_at` — **no** votes, **no** prompt; the feed applies no server-side status filter, so the caller keeps only `status == "processed"`)
   - `ranked_playlists() -> list[dict]` → `GET /v1/feed/ranked` (featured playlists in order; read their items)
@@ -327,7 +367,7 @@ def test_bounded_when_exhausted():
 **Files:** Create `autogen_engine/run.py`; Test `tests/test_run.py`.
 
 **Interfaces:**
-- `run(client, config, now, rng) -> RunSummary` — the data flow from the spec: in-flight guard → template fetch (fail-fast) → read playlist pairs (dedup `already` + `connected` counts) → page candidate image dreams and **keep only `status == "processed"`** (the feed has no server-side status filter) → **fetch votes per candidate via `get_dream`** (the feed omits votes) → compute `feature_score` from `ranked_playlists()` order → assemble `ImageSignals` → `popularity()` → `draw_pairs()` → for each pair, unless `config.dry_run`: `build_ltx_i2v_prompt` → `create_dream` → collect uuid; batch `add_to_playlist` at the end. Returns `{pool, drawn, created, skipped_inflight: bool, dry_run: bool}`.
+- `run(client, config, now, rng) -> RunSummary` — the data flow from the spec: in-flight guard → template fetch (fail-fast) → read playlist pairs (dedup `already` + `connected` counts) → page candidate image dreams (≤ `max_feed_pages`) and **keep only `status == "processed"`** (the feed has no server-side status filter) → **narrow to a shortlist**: rank by the cheap feed signals (playlist-adds + recency), take top `shortlist_size`, and **fetch votes via `get_dream` for the shortlist only** (bounds vote calls regardless of catalog size) → compute `feature_score` from `ranked_playlists()` order → assemble `ImageSignals` → `popularity()` → `draw_pairs()` → for each pair, unless `config.dry_run`: `build_ltx_i2v_prompt` → `create_dream` → collect uuid; batch `add_to_playlist` at the end. Returns `{pool, shortlisted, drawn, created, skipped_inflight: bool, dry_run: bool}`.
 - A `create_dream` failure for one pair is caught, logged, counted; the run continues. A template-fetch failure raises (fail-fast, before any creates).
 
 - [ ] **Step 1: Write failing tests** with a fake client:
@@ -336,6 +376,7 @@ def test_bounded_when_exhausted():
   - dry-run → `create_dream`/`add_to_playlist` never called; `drawn>0`;
   - all pairs already in playlist → `created=0`;
   - non-`processed` images are dropped from the pool (feed returns `queue`/`failed` too);
+  - shortlist caps vote fetches: with a pool > `shortlist_size`, `get_dream` is called at most `shortlist_size` times;
   - happy path (dry_run false, cap 2) → exactly 2 creates, all added to the playlist once;
   - template fetch raises → `run` raises, no creates;
   - one create raises → run continues, `created` counts the successes.
@@ -351,9 +392,9 @@ def test_bounded_when_exhausted():
 **Files:** Create `autogen_engine/__main__.py`; `Procfile`; update `README.md`.
 
 **Interfaces:**
-- `python -m autogen_engine`: `load_config(os.environ)` (exits non-zero with the clear error if required env missing) → build `ApiClient` → `run(client, config, now=datetime.now(tz=utc), rng=random.Random())` → log the summary → exit 0; exit 1 on fatal (e.g. template fetch).
+- `python -m autogen_engine`: `load_config(os.environ)` (exits non-zero with the clear error if required env missing) → **`sleep(rng.uniform(0, config.startup_jitter_seconds))`** so the run lands off the :00 boundary → build `RateLimiter(config.max_rps, ...)` + `ApiClient(..., limiter)` → `run(client, config, now=datetime.now(tz=utc), rng=random.Random())` → log the summary → exit 0; exit 1 on fatal (e.g. template fetch). (The jitter sleep is in the entrypoint, not `run()`, so `run()` stays fast/deterministic in tests.)
 
-- [ ] **Step 1: Implement `__main__.py`** (thin; mirrors the spec entrypoint).
+- [ ] **Step 1: Implement `__main__.py`** (thin; mirrors the spec entrypoint, incl. startup jitter).
 - [ ] **Step 2: Add `Procfile`** — no `web`; document the Heroku Scheduler command `python -m autogen_engine` (nightly, UTC).
 - [ ] **Step 3: Smoke-run the config guard** — `python -m autogen_engine` with required env unset exits non-zero with the missing-env error (no network).
 

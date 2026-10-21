@@ -59,15 +59,19 @@ the pure selection logic. It runs as the **`autogen`** user via that account's A
 
 ```
 Heroku Scheduler (nightly, UTC) → one-off dyno: python -m autogen_engine → run():
+  0. jitter           — sleep(random(0, STARTUP_JITTER_SECONDS)); all calls go through a
+                        shared rate limiter (MAX_RPS, sequential) + backoff-on-429/5xx
   1. in-flight guard  — GET /v1/dream?status=queue,processing (the autogen account's own);
                         skip run if count > MAX_INFLIGHT
   2. template         — GET /v1/dream/:TEMPLATE_DREAM_UUID → base prompt (algo params)
   3. existing pairs   — GET playlist :PLAYLIST_UUID items → each item's prompt →
                         set of (source_dream_uuid,end_source_uuid) already made  [dedup + connectivity]
-  4. candidate pool   — GET /v1/feed?mediaType=image (paged) → image dreams w/ playlistItems,
-                        status, created_at (feed does NOT return votes or prompt);
-                        keep only status == processed (feed has no server-side status filter)
-  4b. votes           — GET /v1/dream/:uuid per candidate → upvotes/downvotes (nightly: OK)
+  4. candidate pool   — GET /v1/feed?mediaType=image (paged, ≤ MAX_FEED_PAGES) → image dreams
+                        w/ playlistItems, status, created_at (feed omits votes + prompt);
+                        keep only status == processed
+  4a. shortlist       — rank by cheap feed signals (playlist-adds + recency), take top
+                        SHORTLIST_SIZE  [bounds the vote fetches below]
+  4b. votes           — GET /v1/dream/:uuid for the SHORTLIST only → upvotes/downvotes
   5. feature stand-in — GET /v1/feed/ranked → featured playlists' items → per-image feature
                         score by ORDER (numeric featureRank is stripped; list order is kept)
   6. popularity()     [pure]  votes + playlist-adds + recency + feature, scaled 0–1 + floor
@@ -167,15 +171,42 @@ guidance, loras, seed) intact. (The worker reads guidance as `guidance` and uses
 - **In-flight guard.** Count the `autogen` account's own `queue`/`processing` dreams via
   `GET /v1/dream?status=queue,processing`; skip the run if over `MAX_INFLIGHT`.
 
+## Being a good API citizen (v1 load management)
+
+Until Phase C moves scoring server-side, `autogen-engine` is a nightly client making many
+reads + a burst of writes against the shared API server. v1 keeps that gentle:
+
+- **Startup jitter.** Heroku Scheduler fires on fixed boundaries (:00), so every scheduled job
+  across the fleet would hit at once. At run start, `sleep(random(0, STARTUP_JITTER_SECONDS))`
+  (default up to 300s) before the first call, so this run lands off the minute/hour.
+- **Client-side rate limit.** All API calls go through one pacer — a token bucket / min-interval
+  (`MAX_RPS`, default low, e.g. 2–4 req/s) so we never fan out bursts. Calls are **sequential**
+  (concurrency 1); no parallel floods.
+- **Two-stage candidate narrowing (also the big call-count win).** Page the feed for the cheap
+  signals it *does* return (playlist-adds + recency), rank those, take the top `SHORTLIST_SIZE`
+  (e.g. 200), and fetch per-image **votes only for the shortlist** — so vote calls are bounded
+  by `SHORTLIST_SIZE`, not catalog size. Also cap feed paging at `MAX_FEED_PAGES`.
+- **Spread the writes.** `POST /v1/dream` also enqueues a GPU job, so creates are paced by the
+  same limiter (not bursted), and the `MAX_INFLIGHT` guard caps how much work is outstanding.
+- **Backoff + jitter on errors.** On `429`/`5xx`, retry with exponential backoff + jitter,
+  honoring `Retry-After`; give up after `RETRY_MAX` and log. Never hot-loop.
+
+**Why not BullMQ here?** A broker is overkill for one nightly batch — and BullMQ is Node, while
+`autogen-engine` is Python. In-process pacing + jitter + backoff gives the politeness without
+new infra. A delayed/scheduled queue (RQ/Celery, or driving it from the Node worker) only earns
+its keep if we later want to **drip generation across the day** instead of one nightly run — a
+future option, noted, not v1.
+
 ## Config
 
 `BACKEND_API`, `API_KEY`, `TEMPLATE_DREAM_UUID`, `PLAYLIST_UUID`, `DRY_RUN` (default `true`),
 `JOBS_PER_RUN`, `CONNECTIVITY_K`, signal weights (`W_VOTES`/`W_PLAYLIST`/`W_RECENCY`/`W_FEATURE`),
-`HALF_LIFE_DAYS`, `MAX_INFLIGHT`. (Removed from v4: `DATABASE_URL_RO`, `REDIS_URL`,
-`CURATION_USER_UUID`, template project/transition keys.) `API_KEY` is the `autogen` account's
-key, emitted by the provisioning script (below); `PLAYLIST_UUID` is the output playlist for
-the env. Entry requires `BACKEND_API`, `API_KEY`, `TEMPLATE_DREAM_UUID`, `PLAYLIST_UUID` or it
-exits non-zero without creating anything.
+`HALF_LIFE_DAYS`, `MAX_INFLIGHT`, and the politeness knobs `STARTUP_JITTER_SECONDS` (300),
+`MAX_RPS` (3), `SHORTLIST_SIZE` (200), `MAX_FEED_PAGES` (20), `RETRY_MAX` (4). (Removed from v4:
+`DATABASE_URL_RO`, `REDIS_URL`, `CURATION_USER_UUID`, template project/transition keys.)
+`API_KEY` is the `autogen` account's key, emitted by the provisioning script (below);
+`PLAYLIST_UUID` is the output playlist for the env. Entry requires `BACKEND_API`, `API_KEY`,
+`TEMPLATE_DREAM_UUID`, `PLAYLIST_UUID` or it exits non-zero without creating anything.
 
 ## Provisioning the `autogen` account (per environment)
 
