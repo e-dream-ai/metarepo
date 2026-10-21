@@ -138,6 +138,10 @@ it need not own anything. Narrowing:
 - **`FeedItem` requirement** → a dream surfaces only if it has a `FeedItem` row (the feed
   joins `FeedItem → dreamItem`). Any processed public image lacking one is invisible to the
   pool — the dry run's reported pool size will expose any such gap.
+- **Self-exclusion** → `autogen` drops candidates owned by its own account
+  (`user.uuid == AUTOGEN_USER_UUID`). Its output is video (never an image candidate), so this
+  is defensive — a guard against self-referential selection / feedback loops, not a load-bearing
+  filter.
 
 ## Selection — weighted lottery (pure)
 
@@ -270,6 +274,10 @@ exists for a creator account).
    created/recorded per env.
 2. **Content-safety sign-off**: `autogen`-owned, instantly-public video from other users'
    images. (Reported images are *not* filtered per review — confirm that's intended.)
+2b. **Discovery pollution** (DECISION): should `autogen`'s content appear in the global feed /
+   ranked-trending / search, or be excluded from those surfaces (visible only via its playlist +
+   direct link)? High output volume means fully-public would likely drown human creators. See
+   Backend API improvements #5; leans toward excluding `autogen` from discovery.
 3. **featureRank stand-in coverage** may be thin (featured playlists are mostly videos) —
    measure in the dry run; keep `W_FEATURE` low or drop it.
 4. **API cost:** the pool is paged from `/v1/feed?mediaType=image` (adds + status inline), then
@@ -300,6 +308,14 @@ backend changes to make *later* — each is an API-server task, decided with the
    directly rather than through `FeedItem`.
 4. **Batch vote lookup** as a cheaper interim than #2 (e.g. `POST /v1/dream/votes` with a list of
    uuids) if the full endpoint is more than we want now.
+5. **Keep `autogen` out of discovery surfaces.** Because output is public + instantly visible,
+   the `autogen` account's high volume would otherwise dominate the **global feed, ranked/
+   trending, and search** that humans see, and skew engagement signals. Options (backend, a
+   product call — see Risks): exclude the `autogen` userId from the default/ranked feed + search
+   (treat it as a system/curation account, reachable only via its playlist + direct link); or
+   mark its dreams so clients can filter; or keep output `hidden` until curated (conflicts with
+   "visible immediately"). `autogen` does **not** vote, so it adds no vote-skew directly; the
+   issue is its *content* appearing in everyone's discovery.
 
 These feed directly into the **server-side scoring phase** (plan Phase C): once the backend can
 rank candidates, the heavy read/compute moves off `autogen-engine`.

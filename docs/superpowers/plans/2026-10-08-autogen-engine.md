@@ -369,7 +369,7 @@ def test_bounded_when_exhausted():
 **Files:** Create `autogen_engine/run.py`; Test `tests/test_run.py`.
 
 **Interfaces:**
-- `run(client, config, now, rng) -> RunSummary` — the data flow from the spec: in-flight guard → template fetch (fail-fast) → read playlist pairs (dedup `already` + `connected` counts) → page candidate image dreams (≤ `max_feed_pages`) and **keep only `status == "processed"`** (the feed has no server-side status filter) → **narrow to a shortlist**: rank by the cheap feed signals (playlist-adds + recency), take top `shortlist_size`, and **fetch votes via `get_dream` for the shortlist only** (bounds vote calls regardless of catalog size) → compute `feature_score` from `ranked_playlists()` order → assemble `ImageSignals` → `popularity()` → `draw_pairs()` → for each pair, unless `config.dry_run`: `build_ltx_i2v_prompt` → `create_dream` → collect uuid; batch `add_to_playlist` at the end. Returns `{pool, shortlisted, drawn, created, skipped_inflight: bool, dry_run: bool}`.
+- `run(client, config, now, rng) -> RunSummary` — the data flow from the spec: in-flight guard → template fetch (fail-fast) → read playlist pairs (dedup `already` + `connected` counts) → page candidate image dreams (≤ `max_feed_pages`) and **keep only `status == "processed"` and drop any owned by `config.autogen_user_uuid`** (self-exclusion; the feed has no server-side status filter) → **narrow to a shortlist**: rank by the cheap feed signals (playlist-adds + recency), take top `shortlist_size`, and **fetch votes via `get_dream` for the shortlist only** (bounds vote calls regardless of catalog size) → compute `feature_score` from `ranked_playlists()` order → assemble `ImageSignals` → `popularity()` → `draw_pairs()` → for each pair, unless `config.dry_run`: `build_ltx_i2v_prompt` → `create_dream` → collect uuid; batch `add_to_playlist` at the end. Returns `{pool, shortlisted, drawn, created, skipped_inflight: bool, dry_run: bool}`.
 - A `create_dream` failure for one pair is caught, logged, counted; the run continues. **Fail-fast (raise, before any creates)** on: template fetch 404, playlist fetch 404, or a template prompt whose `infinidream_algorithm` isn't `ltx-i2v`.
 - Created-dream **`name`** is derived deterministically: `f"autogen {start[:8]}→{end[:8]}"`.
 - Reading playlist items for `already`/`connected`: **skip** any item whose prompt lacks both `source_dream_uuid` and `end_source_uuid` (hand-added / non-i2v), don't error.
@@ -381,6 +381,7 @@ def test_bounded_when_exhausted():
   - dry-run → `create_dream`/`add_to_playlist` never called; `drawn>0`;
   - all pairs already in playlist → `created=0`;
   - non-`processed` images are dropped from the pool (feed returns `queue`/`failed` too);
+  - images owned by `autogen_user_uuid` are dropped from the pool (self-exclusion);
   - shortlist caps vote fetches: with a pool > `shortlist_size`, `get_dream` is called at most `shortlist_size` times;
   - happy path (dry_run false, cap 2) → exactly 2 creates, all added to the playlist once;
   - template fetch 404 / non-ltx-i2v template prompt / playlist 404 → `run` raises, no creates;
@@ -432,6 +433,7 @@ Run: `BACKEND_API= python -m autogen_engine; echo $?` → non-zero.
 > this document.
 
 **Backend tasks (api server):**
+- **C0 — Discovery exclusion (may be needed before *full* rollout, pending the §Risks 2b decision).** Exclude the `autogen` account from the global/ranked feed + search (treat it as a system/curation account surfaced only via its playlist + direct link), or mark its dreams for client-side filtering. Prevents `autogen`'s volume from drowning human creators / skewing discovery. Independent of server-side scoring but grouped here as backend work.
 - **C1 — Candidate endpoint.** `GET /v1/autogen/candidates` (regular-user) returning
   processed, non-hidden image dreams **scored/ordered server-side** — votes +
   playlist-adds + recency + featureRank folded in one query, `status = processed`
