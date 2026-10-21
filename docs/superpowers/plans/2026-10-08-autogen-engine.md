@@ -373,6 +373,42 @@ Run: `BACKEND_API= python -m autogen_engine; echo $?` → non-zero.
 
 ---
 
+## Phase C (follow-on — NOT part of v1 execution; gets its own spec + plan)
+
+> Rationale: v1 hammers the public API — paging the whole stills feed and one
+> `GET /v1/dream/:uuid` per candidate for votes (which the feed omits, likely on
+> purpose). Moving the scoring into the API server is far more efficient (one SQL pass,
+> no pagination, no per-image calls) and avoids ever shipping raw vote counts to a
+> client. Do this once v1 has proven the selection logic in practice. These are
+> outlines, to be expanded into a proper spec/plan when scheduled — not executed from
+> this document.
+
+**Backend tasks (api server):**
+- **C1 — Candidate endpoint.** `GET /v1/autogen/candidates` (regular-user) returning
+  processed, non-hidden image dreams **scored/ordered server-side** — votes +
+  playlist-adds + recency + featureRank folded in one query, `status = processed`
+  enforced server-side, votes never leaving the server as raw counts. Reuses the pure
+  scoring logic (port `popularity` to TS, or compute in SQL). Resolves spec API-improvements
+  #1–#3.
+- **C2 — (optional interim) batch votes** `POST /v1/dream/votes` (list of uuids → counts)
+  if C1 is deferred — a cheaper stopgap than per-image fetches.
+- **C3 — `FeedItem` coverage check/backfill** (or have C1 query dreams directly), so no
+  processed public image is invisible to the pool.
+
+**`autogen-engine` change:**
+- **C4 — Thin client.** Replace `list_image_dreams` + per-candidate `get_dream` votes +
+  client-side `popularity` with a single call to C1; keep `draw_pairs`,
+  `build_ltx_i2v_prompt`, dedup-via-playlist, and create+add unchanged. (Pure
+  `draw_pairs`/`build_ltx_i2v_prompt` and their tests carry over verbatim.) Alternatively,
+  if the backend owns the whole loop, `autogen-engine` is retired.
+
+**Decision at that time:** does the backend just *rank* (autogen-engine still draws +
+creates) or own the *entire* loop (draw + create + playlist add)? Ranking-only keeps the
+selection logic testable in Python and the create path as the `autogen` user; full-backend
+removes the service but needs the pairing/lottery + playlist writes server-side.
+
+---
+
 ## Self-Review
 
 **Spec coverage:** provisioning (A1), config (B1), popularity (B2), weighted-lottery draw (B3), ltx-i2v prompt from a template dream (B4), API client over `edream_sdk` incl. feed/ranked/playlist/dream-status/create/batch-add (B5), orchestration with in-flight guard + dry-run + dedup-via-playlist + fail-fast template + per-pair failure tolerance + batch add (B6), entrypoint + Scheduler (B7), deploy + staged rollout (B8). Deferred items (watch-through #691, ranked-signals endpoint, cooldown re-gen, SDK promotion) correctly omitted. No new backend query endpoints — the API survey confirmed they exist for a creator account.

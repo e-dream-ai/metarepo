@@ -225,12 +225,40 @@ exists for a creator account).
 5. **`edream_sdk` extensions** must not change behavior for existing SDK consumers (engines,
    video, electric-sheep-engine).
 
+## Backend API improvements (follow-on, not required for v1)
+
+v1 composes existing endpoints, which is enough nightly but has rough edges. These are
+backend changes to make *later* — each is an API-server task, decided with the backend team:
+
+1. **Votes are omitted from the feed — likely on purpose.** `getFeedDreamItemSelectedColumns`
+   returns no `upvotes`/`downvotes`; raw counts may be withheld deliberately (anti-gaming,
+   or they're surfaced differently in-product). v1 reads them via per-dream `GET /v1/dream/:uuid`
+   (which does expose them) — but **do not widen the feed to return votes** without confirming
+   that's acceptable. The better path is to keep votes server-side and never ship raw counts to
+   clients at all (see #2).
+2. **A dedicated candidate/signals endpoint.** A regular-user `GET /v1/autogen/candidates`
+   (or `GET /v1/dream/ranked-stills`) that returns processed, non-hidden image dreams already
+   scored/ordered server-side — folding in votes, playlist-adds, recency, and featureRank in
+   **one query**, with `status = processed` enforced server-side. Removes: the per-image vote
+   fetch, client-side status filtering, deep feed pagination, and the need to expose raw votes.
+3. **`FeedItem` coverage.** Confirm every processed public image has a `FeedItem` row (else it is
+   invisible to the pool); if not, either backfill or have the candidate endpoint query dreams
+   directly rather than through `FeedItem`.
+4. **Batch vote lookup** as a cheaper interim than #2 (e.g. `POST /v1/dream/votes` with a list of
+   uuids) if the full endpoint is more than we want now.
+
+These feed directly into the **server-side scoring phase** (plan Phase C): once the backend can
+rank candidates, the heavy read/compute moves off `autogen-engine`.
+
 ## Deferred / future
 
+- **Server-side scoring (plan Phase C).** Move `popularity`/selection into the API server so
+  `autogen-engine` stops paging the feed and fetching per-image votes — far fewer round-trips,
+  no raw-vote exposure, one SQL pass instead of N calls. `autogen-engine` becomes a thin
+  trigger (ask the backend for ranked pairs, then create + add to playlist), or the backend owns
+  the whole loop. Gets its own spec/plan.
 - **Watch-through signal** — client [issue #691](https://github.com/e-dream-ai/client/issues/691):
   report how far a dream was watched + skipped-vs-finished. Strongest quality signal; once
-  captured and exposed via the API, add a `plays` term to `popularity(d)`.
-- Backend **ranked-signals endpoint** that returns the ranked candidate pool in one call
-  (optimization over paging the feed).
+  captured and exposed, add a `plays` term to `popularity(d)`.
 - Re-generation policy (cooldown/score-rise) if manual playlist-removal proves insufficient.
 - Promoting `autogen`'s `edream_sdk` additions into the shared SDK for other consumers.
