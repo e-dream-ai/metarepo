@@ -274,10 +274,13 @@ exists for a creator account).
    created/recorded per env.
 2. **Content-safety sign-off**: `autogen`-owned, instantly-public video from other users'
    images. (Reported images are *not* filtered per review — confirm that's intended.)
-2b. **Discovery pollution** (DECISION): should `autogen`'s content appear in the global feed /
-   ranked-trending / search, or be excluded from those surfaces (visible only via its playlist +
-   direct link)? High output volume means fully-public would likely drown human creators. See
-   Backend API improvements #5; leans toward excluding `autogen` from discovery.
+2b. **Discovery pollution** — **OPEN QUESTION (for Spot).** Because output is public +
+   instantly visible, `autogen`'s volume would flow into the global feed / ranked-trending /
+   search humans see. Should `autogen` be **excluded from those discovery surfaces** (reachable
+   only via its playlist + direct link, treated as a system/curation account), left **fully
+   public** like any creator, or **started hidden** and curated? Needs Spot's call; see Backend
+   API improvements #5 and plan task C0. (`autogen` does not vote, so no direct vote-skew — the
+   question is purely about its *content* appearing in everyone's discovery.)
 3. **featureRank stand-in coverage** may be thin (featured playlists are mostly videos) —
    measure in the dry run; keep `W_FEATURE` low or drop it.
 4. **API cost:** the pool is paged from `/v1/feed?mediaType=image` (adds + status inline), then
