@@ -61,19 +61,24 @@ the pure selection logic. It runs as the **`autogen`** user via that account's A
 Heroku Scheduler (nightly, UTC) → one-off dyno: python -m autogen_engine → run():
   0. jitter           — sleep(random(0, STARTUP_JITTER_SECONDS)); all calls go through a
                         shared rate limiter (MAX_RPS, sequential) + backoff-on-429/5xx
-  1. in-flight guard  — GET /v1/dream?status=queue,processing (the autogen account's own);
-                        skip run if count > MAX_INFLIGHT
+  1. in-flight guard  — GET /v1/dream?userUUID=<AUTOGEN_USER_UUID>&status=queue, then
+                        &status=processing (status is a single enum → two calls); sum counts;
+                        skip run if sum > MAX_INFLIGHT
   2. template         — GET /v1/dream/:TEMPLATE_DREAM_UUID → base prompt (algo params)
   3. existing pairs   — GET playlist :PLAYLIST_UUID items → each item's prompt →
                         set of (source_dream_uuid,end_source_uuid) already made  [dedup + connectivity]
-  4. candidate pool   — GET /v1/feed?mediaType=image (paged, ≤ MAX_FEED_PAGES) → image dreams
-                        w/ playlistItems, status, created_at (feed omits votes + prompt);
-                        keep only status == processed
+  4. candidate pool   — GET /v1/feed?type=dream&mediaType=image (paged, ≤ MAX_FEED_PAGES) →
+                        image dreams w/ playlistItems, status, created_at (feed omits votes +
+                        prompt); keep only status == processed. (Ordered created_at DESC — new
+                        inserts can shift offsets between pages; tolerable for a capped sweep.)
   4a. shortlist       — rank by cheap feed signals (playlist-adds + recency), take top
                         SHORTLIST_SIZE  [bounds the vote fetches below]
   4b. votes           — GET /v1/dream/:uuid for the SHORTLIST only → upvotes/downvotes
-  5. feature stand-in — GET /v1/feed/ranked → featured playlists' items → per-image feature
-                        score by ORDER (numeric featureRank is stripped; list order is kept)
+  5. feature stand-in — GET /v1/feed/ranked (playlists) → walk each ranked playlist's items
+                        (extra GET /:uuid/items calls) → per-image score by ORDER (numeric
+                        featureRank stripped; order kept). Optional: set W_FEATURE=0 to skip
+                        this fan-out entirely (coverage is thin — featured content is mostly
+                        videos)
   6. popularity()     [pure]  votes + playlist-adds + recency + feature, scaled 0–1 + floor
   7. drawPairs()      [pure]  weighted lottery, N draws, bias by connectivity k, skip self/dup
   8. for each drawn pair (unless DRY_RUN):
@@ -88,7 +93,7 @@ Heroku Scheduler (nightly, UTC) → one-off dyno: python -m autogen_engine → r
 
 | Capability | Endpoint | Status |
 |------------|----------|--------|
-| In-flight guard | `GET /v1/dream?status=queue,processing` (own dreams) | **exists** |
+| In-flight guard | `GET /v1/dream?userUUID=<AUTOGEN_USER_UUID>&status=queue` + `&status=processing` (single-status enum → two calls; `/my-dreams` has no status filter) | **exists** |
 | Template prompt | `GET /v1/dream/:TEMPLATE_DREAM_UUID` | **exists** |
 | Existing pairs (state) | `GET /v1/playlist/:PLAYLIST_UUID/items` — items `leftJoinAndSelect` the full dream incl. `prompt` | **exists** (no follow-up calls) |
 | Candidate pool | `GET /v1/feed?mediaType=image` (paged) — returns `playlistItems`, `status`, `created_at`/`updated_at`, `user` (**not** votes, **not** prompt); filter to `status == processed` client-side | **exists** |
@@ -145,7 +150,10 @@ For the candidate images `d`:
    playlist's pairs.
 3. `w(d) = popularity(d) × (1 + k · connected(d))`.
 4. For each of `N` draws: pick a start and an end with probability ∝ `w`. **Redraw** if
-   `start == end` or the `(start,end)` pair is already in the playlist.
+   `start == end` or the `(start,end)` pair is already in the playlist. If no fresh valid pair
+   is found within a bounded `max_attempts` (pool of 1, or everything already made), **stop and
+   return fewer than `N` (possibly 0)** — never loop. The floor is applied **before** the 0–1
+   normalization, so an all-zero-signal set still yields positive weights (no divide-by-zero).
 
 `k` biases toward images already used, so videos link into a connected graph; the floor +
 randomness give long-tail images a chance (this replaces the v4 "lowest-scored
@@ -161,15 +169,26 @@ deterministic; production seeds from the clock at run start.
 `prompt` object, force `infinidream_algorithm: "ltx-i2v"`, set `source_dream_uuid = start`
 and `end_source_uuid = end`, and leave the template's other params (prompt text, duration,
 guidance, loras, seed) intact. (The worker reads guidance as `guidance` and uses
-`high_noise_loras[0]`.)
+`high_noise_loras[0]`.) **Startup validation:** the template dream's prompt must already be
+ltx-i2v-shaped — if its `infinidream_algorithm` isn't `ltx-i2v`, fail-fast rather than
+force-set it onto non-ltx params (which would enqueue jobs the worker can't run).
+
+The created dream's **`name`** is derived deterministically, e.g. `autogen <start8>→<end8>`
+(first 8 chars of each source uuid), so output is identifiable in the `autogen` account.
 
 ## Dedup & in-flight (no extra storage)
 
 - **Dedup = the output playlist.** The set of `(source,end)` pairs already present (from step
   3) is the dedup set; a drawn pair in that set is redrawn. Delete a dream from the playlist
-  to allow its pair to regenerate (manual redo). No cooldown/score-rise in v1.
-- **In-flight guard.** Count the `autogen` account's own `queue`/`processing` dreams via
-  `GET /v1/dream?status=queue,processing`; skip the run if over `MAX_INFLIGHT`.
+  to allow its pair to regenerate (manual redo). No cooldown/score-rise in v1. **When reading
+  playlist items, skip any whose prompt lacks both `source_dream_uuid` and `end_source_uuid`**
+  (a hand-added or non-i2v item) rather than erroring.
+- **In-flight guard.** There is no single "my dreams by status" endpoint: `/my-dreams` is
+  caller-scoped but has no status filter, and `GET /v1/dream` filters by a `userUUID` param
+  with a **single** status enum. So count the `autogen` account's non-terminal dreams with two
+  calls — `GET /v1/dream?userUUID=<AUTOGEN_USER_UUID>&status=queue` and `…&status=processing` —
+  and sum. `AUTOGEN_USER_UUID` is emitted by the provisioning script. Skip the run if the sum
+  exceeds `MAX_INFLIGHT`.
 
 ## Being a good API citizen (v1 load management)
 
@@ -199,19 +218,23 @@ future option, noted, not v1.
 
 ## Config
 
-`BACKEND_API`, `API_KEY`, `TEMPLATE_DREAM_UUID`, `PLAYLIST_UUID`, `DRY_RUN` (default `true`),
-`JOBS_PER_RUN`, `CONNECTIVITY_K`, signal weights (`W_VOTES`/`W_PLAYLIST`/`W_RECENCY`/`W_FEATURE`),
-`HALF_LIFE_DAYS`, `MAX_INFLIGHT`, and the politeness knobs `STARTUP_JITTER_SECONDS` (300),
-`MAX_RPS` (3), `SHORTLIST_SIZE` (200), `MAX_FEED_PAGES` (20), `RETRY_MAX` (4). (Removed from v4:
-`DATABASE_URL_RO`, `REDIS_URL`, `CURATION_USER_UUID`, template project/transition keys.)
-`API_KEY` is the `autogen` account's key, emitted by the provisioning script (below);
+`BACKEND_API`, `API_KEY`, `AUTOGEN_USER_UUID`, `TEMPLATE_DREAM_UUID`, `PLAYLIST_UUID`,
+`DRY_RUN` (default `true`), `JOBS_PER_RUN`, `CONNECTIVITY_K`, signal weights
+(`W_VOTES`/`W_PLAYLIST`/`W_RECENCY`/`W_FEATURE`), `HALF_LIFE_DAYS`, `MAX_INFLIGHT`, and the
+politeness knobs `STARTUP_JITTER_SECONDS` (300), `MAX_RPS` (3), `SHORTLIST_SIZE` (200),
+`MAX_FEED_PAGES` (20), `RETRY_MAX` (4). (Removed from v4: `DATABASE_URL_RO`, `REDIS_URL`,
+`CURATION_USER_UUID`, template project/transition keys.) `API_KEY` + `AUTOGEN_USER_UUID` are the
+`autogen` account's key and user uuid, both emitted by the provisioning script (below);
 `PLAYLIST_UUID` is the output playlist for the env. Entry requires `BACKEND_API`, `API_KEY`,
-`TEMPLATE_DREAM_UUID`, `PLAYLIST_UUID` or it exits non-zero without creating anything.
+`AUTOGEN_USER_UUID`, `TEMPLATE_DREAM_UUID`, `PLAYLIST_UUID` or it exits non-zero without creating
+anything; and it **fail-fast exits** if `TEMPLATE_DREAM_UUID` or `PLAYLIST_UUID` 404s, or if the
+template dream's prompt is not ltx-i2v-shaped (see Prompt building).
 
 ## Provisioning the `autogen` account (per environment)
 
 A **provisioning script** (run once per env — dev/stage/prod) creates the dedicated `autogen`
-user as a non-admin **creator** (so `POST /v1/dream` is permitted), issues its **API key**, and
+user as a non-admin **creator** (so `POST /v1/dream` is permitted), issues its **API key**,
+records its **user uuid** (→ `AUTOGEN_USER_UUID`, needed for the in-flight guard), and
 ensures an **output playlist** exists; it prints the `API_KEY` + `PLAYLIST_UUID` to configure
 `autogen-engine`. It lives where user + API-key + role creation is possible (a backend
 `src/script/*` admin script, following the `cron:default-playlist` script pattern). This is the

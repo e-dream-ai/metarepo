@@ -111,7 +111,7 @@ from autogen_engine.config import load_config
 
 BASE = {
     "BACKEND_API": "https://api-stage.infinidream.ai/api",
-    "API_KEY": "k", "TEMPLATE_DREAM_UUID": "t", "PLAYLIST_UUID": "p",
+    "API_KEY": "k", "AUTOGEN_USER_UUID": "u", "TEMPLATE_DREAM_UUID": "t", "PLAYLIST_UUID": "p",
 }
 
 def test_defaults():
@@ -145,7 +145,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping
 
-REQUIRED = ("BACKEND_API", "API_KEY", "TEMPLATE_DREAM_UUID", "PLAYLIST_UUID")
+REQUIRED = ("BACKEND_API", "API_KEY", "AUTOGEN_USER_UUID", "TEMPLATE_DREAM_UUID", "PLAYLIST_UUID")
 
 def _num(env, key, default):
     v = env.get(key)
@@ -158,6 +158,7 @@ def _num(env, key, default):
 class Config:
     backend_api: str
     api_key: str
+    autogen_user_uuid: str
     template_dream_uuid: str
     playlist_uuid: str
     dry_run: bool = True
@@ -181,6 +182,7 @@ def load_config(env: Mapping[str, str]) -> Config:
         raise ValueError(f"missing required env: {', '.join(missing)}")
     return Config(
         backend_api=env["BACKEND_API"], api_key=env["API_KEY"],
+        autogen_user_uuid=env["AUTOGEN_USER_UUID"],
         template_dream_uuid=env["TEMPLATE_DREAM_UUID"], playlist_uuid=env["PLAYLIST_UUID"],
         dry_run=(env.get("DRY_RUN", "true").lower() != "false"),
         jobs_per_run=_num(env, "JOBS_PER_RUN", 10),
@@ -347,7 +349,7 @@ def test_bounded_when_exhausted():
   - `get_dream(uuid) -> dict` (the template; also the **per-candidate votes** source — the feed omits votes, so fetch `upvotes`/`downvotes` here)
   - `list_image_dreams(take, skip) -> list[dict]` → `GET /v1/feed?mediaType=image` (each item has `uuid`,`status`,`playlistItems`,`user`,`created_at`/`updated_at` — **no** votes, **no** prompt; the feed applies no server-side status filter, so the caller keeps only `status == "processed"`)
   - `ranked_playlists() -> list[dict]` → `GET /v1/feed/ranked` (featured playlists in order; read their items)
-  - `inflight_count() -> int` → `GET /v1/dream?status=queue,processing` (own dreams)
+  - `inflight_count(autogen_user_uuid) -> int` → **two** calls `GET /v1/dream?userUUID=<uuid>&status=queue` + `…&status=processing` (status is a single enum; `/my-dreams` has no status filter), summed
   - `playlist_items(uuid) -> list[dict]` → `GET /v1/playlist/:uuid/items` (items include dream `prompt`)
   - `create_dream(name, prompt) -> str` → `POST /v1/dream`, returns uuid
   - `add_to_playlist(playlist_uuid, dream_uuids: list[str])` → `POST /v1/playlist/:uuid/items` (atomic batch)
@@ -368,7 +370,10 @@ def test_bounded_when_exhausted():
 
 **Interfaces:**
 - `run(client, config, now, rng) -> RunSummary` — the data flow from the spec: in-flight guard → template fetch (fail-fast) → read playlist pairs (dedup `already` + `connected` counts) → page candidate image dreams (≤ `max_feed_pages`) and **keep only `status == "processed"`** (the feed has no server-side status filter) → **narrow to a shortlist**: rank by the cheap feed signals (playlist-adds + recency), take top `shortlist_size`, and **fetch votes via `get_dream` for the shortlist only** (bounds vote calls regardless of catalog size) → compute `feature_score` from `ranked_playlists()` order → assemble `ImageSignals` → `popularity()` → `draw_pairs()` → for each pair, unless `config.dry_run`: `build_ltx_i2v_prompt` → `create_dream` → collect uuid; batch `add_to_playlist` at the end. Returns `{pool, shortlisted, drawn, created, skipped_inflight: bool, dry_run: bool}`.
-- A `create_dream` failure for one pair is caught, logged, counted; the run continues. A template-fetch failure raises (fail-fast, before any creates).
+- A `create_dream` failure for one pair is caught, logged, counted; the run continues. **Fail-fast (raise, before any creates)** on: template fetch 404, playlist fetch 404, or a template prompt whose `infinidream_algorithm` isn't `ltx-i2v`.
+- Created-dream **`name`** is derived deterministically: `f"autogen {start[:8]}→{end[:8]}"`.
+- Reading playlist items for `already`/`connected`: **skip** any item whose prompt lacks both `source_dream_uuid` and `end_source_uuid` (hand-added / non-i2v), don't error.
+- `draw_pairs` returning fewer than `jobs_per_run` (exhausted/degenerate) is normal — the run creates what it got and reports it; never loops.
 
 - [ ] **Step 1: Write failing tests** with a fake client:
   - in-flight over cap → `skipped_inflight=True`, no creates;
@@ -378,8 +383,10 @@ def test_bounded_when_exhausted():
   - non-`processed` images are dropped from the pool (feed returns `queue`/`failed` too);
   - shortlist caps vote fetches: with a pool > `shortlist_size`, `get_dream` is called at most `shortlist_size` times;
   - happy path (dry_run false, cap 2) → exactly 2 creates, all added to the playlist once;
-  - template fetch raises → `run` raises, no creates;
-  - one create raises → run continues, `created` counts the successes.
+  - template fetch 404 / non-ltx-i2v template prompt / playlist 404 → `run` raises, no creates;
+  - one create raises → run continues, `created` counts the successes;
+  - playlist item with a prompt missing source/end uuids → skipped, not an error;
+  - created-dream name is `autogen <start8>→<end8>`.
 - [ ] **Step 2: Run → fail.**
 - [ ] **Step 3: Implement** `run.py` (pure fns do the logic; this wires I/O + logging).
 - [ ] **Step 4: Run → pass.**
@@ -408,7 +415,7 @@ Run: `BACKEND_API= python -m autogen_engine; echo $?` → non-zero.
 
 **Files:** `README.md` (ops section).
 
-- [ ] **Step 1: Document deploy** — create the `autogen-engine` Heroku app (no web dyno), add the Scheduler add-on with `python -m autogen_engine` nightly (UTC). Set env from Task A1's output (`API_KEY`, `PLAYLIST_UUID`) + `BACKEND_API`, `TEMPLATE_DREAM_UUID`, and tunables.
+- [ ] **Step 1: Document deploy** — create the `autogen-engine` Heroku app (no web dyno), add the Scheduler add-on with `python -m autogen_engine` nightly (UTC). Set env from Task A1's output (`API_KEY`, `AUTOGEN_USER_UUID`, `PLAYLIST_UUID`) + `BACKEND_API`, `TEMPLATE_DREAM_UUID`, and tunables.
 - [ ] **Step 2: Document the rollout gates** — (1) `DRY_RUN=true` (default): score/draw/log, create nothing; inspect the summary + the `feature_score` coverage (drop/keep `W_FEATURE`). (2) `DRY_RUN=false`, `JOBS_PER_RUN=2`: eyeball the `autogen` account's output + the playlist. (3) raise `JOBS_PER_RUN`, leave scheduled.
 - [ ] **Step 3: Commit** `docs: autogen-engine deploy + rollout`.
 
