@@ -255,6 +255,8 @@ When `socket.io-client-cpp` auto-reconnects, it reuses the original query/header
 
 **Fix:** On successful `RefreshSealedSession()`, disconnect and reconnect the socket with the new session. Or disable auto-reconnect and manage reconnection manually (similar to the web frontend's approach in `socket.context.tsx`).
 
+**Resolved** (2026-10-25, client#713; built and tested on Mac/Linux in client#714; tracked as client#538). The client took a third approach: it refreshes when a reconnect is rejected. After #698 replaced `socket.io-client-cpp` with a Boost.Beast client, the socket reports `CONNECT_ERROR` through a `connect_error_listener`. On `UNAUTHORIZED` with a sealed session, `OnWebSocketConnectError` (`client_generic/Networking/EDreamClient.cpp`) runs `RefreshSealedSession()` on a background thread, then `ConnectRemoteControlSocket()`, which reconnects with the new cookie. Refreshes are limited to one per minute, and Api-Key auth is skipped. Fix #2 (server-side refresh during the socket handshake) is not required for the client, which now recovers on its own. A refresh triggered by the socket can still run at the same time as an HTTP-triggered one (e.g. `UpdateQuota`), so it relies on Fix #1's dedup.
+
 ## Testing
 
 - **#1**: Send 5+ concurrent authenticated requests after session expiry. All should succeed (at most one refresh call to WorkOS). Verify via Redis key inspection or WorkOS audit logs.
