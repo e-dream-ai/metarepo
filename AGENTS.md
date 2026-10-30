@@ -107,15 +107,20 @@ The `.env` files in `backend/` and `frontend/` are pre-configured to point at **
 
 Because `backend/.env` points at the shared **staging** RDS (above), the database
 you connect to is the same one Heroku deploys against. Backend deploys on push to
-`stage`, so by the time a migration file reaches your working tree, that migration
-has almost always already been applied to staging by the deploy. Pulling the file
-gives you the *source* for a schema change the DB already has.
+`stage` (and `main` for alpha), and every deploy applies pending migrations in the
+Heroku release phase (`release:` in `backend/Procfile`, `npm run migration:release`)
+before the new version goes live; a failed migration aborts the deploy. So by the
+time a migration file reaches your working tree, that migration has almost always
+already been applied to staging. Pulling the file gives you the *source* for a
+schema change the DB already has. Production no longer needs a manual
+`migration:run` before pushing to `main` either.
 
 Running it anyway is not a no-op you can shrug off: it is a write against shared
 staging that every other developer and the deployed stage frontend are also using.
 
-Your `.env` will not do it for you either — `TYPEORM_MIGRATIONS_RUN=false` and
-`TYPEORM_SYNCHRONIZE=false`, so the dev server never applies anything on startup.
+The dev server will not do it for you either: the app never runs migrations on
+boot (`migrationsRun: false` in `app-data-source.ts`; the old
+`TYPEORM_MIGRATIONS_RUN` variable is gone) and `TYPEORM_SYNCHRONIZE=false`.
 
 Check instead of assuming (read-only, ~30s, connects to staging):
 
