@@ -36,7 +36,7 @@ Out of scope for now: the sign-in flow (magic link, WorkOS, refresh). The harnes
 
 1. Accept a scheme given in `settings.content.server` (`http://…` → plain HTTP, and plain `ws://` in `sio_beast.cpp`), log a warning that the connection is unencrypted, and over plain http send only the env API key, never a stored real login.
 2. `INFINIDREAM_DATA_DIR`, so that settings, cache and logs live in a temp directory per run.
-3. **A render heartbeat log line (new).** One `info` line from the render thread, every 10 s by default. The harness sets `INFINIDREAM_HEARTBEAT_SECONDS=1` to get 1 Hz, and the 10 s default keeps logs small on users' machines. Each line has: current and next dream, frame index, queue depth, buffering/paused/transition state, and the wall-clock interval since the last tick. This is the most reliable hang signal, and the starting point for Phase 3. See "Hang detection" for why the other signals aren't enough.
+3. **A render heartbeat log line (new).** One `info` line from the render thread, every 60 s by default. The harness sets `INFINIDREAM_HEARTBEAT_SECONDS=1` to get 1 Hz, and the 60 s default keeps logs small on users' machines. Each line has: current and next dream, frame index, queue depth, buffering/paused/transition state, and the wall-clock interval since the last tick. This is the most reliable hang signal, and the starting point for Phase 3. See "Hang detection" for why the other signals aren't enough.
 
 The harness can start before (1) and (2) land, by having a developer point a Debug build at the server by hand. It can't run unattended until they do.
 
@@ -231,7 +231,7 @@ Expected first catches: the #728 class (a seek onto a shared download that dies)
 
 This comes after crashes and hangs. The logging audit found the gaps; this is the minimum client work, roughly in priority order:
 
-1. **Render heartbeat** (also the hang signal): always on, every 10 s by default and 1 Hz under the harness. Each line reports ticks, frames popped, discarded, and repeated, queue depth for the current and next clip, the maximum tick interval, and states.
+1. **Render heartbeat** (also the hang signal): always on, every 60 s by default and 1 Hz under the harness. Each line reports ticks, frames popped, discarded, and repeated, queue depth for the current and next clip, the maximum tick interval, and states.
 2. **Wall-clock durations.** The playback timeline freezes during a buffering pause, so today `m_TotalBufferingTime` is about 0 and is never read. Add `steady_clock` durations to:
    - "Buffer refilled" (rebuffer duration)
    - initial buffering
