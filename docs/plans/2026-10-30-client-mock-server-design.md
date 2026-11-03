@@ -1,4 +1,4 @@
-# Client fake server and test harness: design
+# Client mock server and test harness: design
 
 Tracking issue: [client#733](https://github.com/e-dream-ai/client/issues/733). Date: 2026-10-30.
 
@@ -15,7 +15,7 @@ Out of scope for now: the sign-in flow (magic link, WorkOS, refresh). The harnes
 ## Architecture
 
 ```
-            ┌──────────────────────────── fake server (one Python process, one port) ──────────────────────────────┐
+            ┌──────────────────────────── mock server (one Python process, one port) ──────────────────────────────┐
  runner ───►│ /control/*   scenario + fault + profile API, event log                                                │
  (pytest)   │ /api/v1/client/*   hello, playlist, dream, url, quota, dislikes, telemetry   ◄── shaped by "api" profile │
             │ /socket.io/  Engine.IO v4 + Socket.IO /remote-control (hand-rolled)            ◄── "socket" profile     │
@@ -30,7 +30,7 @@ Out of scope for now: the sign-in flow (magic link, WorkOS, refresh). The harnes
 
 - **Language:** Python 3.11+ with `asyncio` and `aiohttp` (HTTP and WebSocket server). It's pure Python, so it runs on all three OSes and in CI.
 - **One port.** The client's server setting is a single `host:port`, and the media URLs returned by `/url` point back at the same server. It binds `127.0.0.1` by default, or `0.0.0.0` in LAN mode, so a Mac-hosted server can drive a Windows or Linux client.
-- **Home:** the client repo, under `Tests/fake-server/`. It replaces the old `Tests/mock-websocket-server`, which predates the Socket.IO protocol.
+- **Home:** the client repo, under `client_generic/tests/mock-server/`. It replaces the old `client_generic/tests/mock-websocket-server`, which predates the Socket.IO protocol.
 
 ### Client prerequisites (from #733)
 
@@ -40,11 +40,11 @@ Out of scope for now: the sign-in flow (magic link, WorkOS, refresh). The harnes
 
 The harness can start before (1) and (2) land, by having a developer point a Debug build at the server by hand. It can't run unattended until they do.
 
-## Fake API: what the client actually depends on
+## Mock API: what the client actually depends on
 
 From the contract audit (client master @ 5a5b471b, backend `origin/stage` @ eeb94b6):
 
-| Endpoint | Shape the client needs | Notes for the fake |
+| Endpoint | Shape the client needs | Notes for the mock |
 |---|---|---|
 | `GET /client/hello` | `{success, data:{quota:int, dislikesCount:int, quotaExpiresAt?, currentPlaylistUUID?}}` | A missing `quota` or `dislikesCount` → "malformed hello"; 4xx → client signs out; 5xx → 60 s backoff ×3. |
 | `GET /client/playlist/{id}` | `data.playlist.{name, artist, nsfw, timestamp, loops, transitionTime, contents:[{uuid, timestamp, start_keyframe?, end_keyframe?}]}` | Replay a recorded fixture. |
@@ -172,11 +172,11 @@ A `pytest` plugin plus a small library.
    - Make `tmp/<run-id>/data/`.
    - Write `settings.json` there, with `settings.content.server = http://127.0.0.1:<port>`, logging on, and quota-relevant settings.
    - Start the client binary with `INFINIDREAM_DATA_DIR`, `INFINIDREAM_API_KEY=test` and `INFINIDREAM_HEARTBEAT_SECONDS=1`. Binary paths per OS come from config; on Mac the harness runs `infinidream.app/Contents/MacOS/infinidream` directly, and on Windows it runs the windowed `.exe`, not the `.scr`.
-   - The key has to come from the env var: over `http` the client ignores `api_key` and `sealed_session` in `settings.json`. Don't set `settings.generator.nickname`, because magic link is tried before the API key.
-2. **Wait until ready.** Don't drive a scenario until the fake server has seen the client's `hello` and its socket CONNECT on `/remote-control`. The server sees both itself, so this doesn't depend on parsing client logs. Never becoming ready within a timeout is a failed run, reported as such.
+   - The key has to come from the env var: over `http` the client ignores `api_key` and `sealed_session` in `settings.json`. Don't set `settings.generator.nickname`, because magic link is tried before the API key. Do set `settings.app.firsttimesetup` to true: otherwise the Mac client hides the player view and playback never starts.
+2. **Wait until ready.** Don't drive a scenario until the mock server has seen the client's `hello` and its socket CONNECT on `/remote-control`. The server sees both itself, so this doesn't depend on parsing client logs. Never becoming ready within a timeout is a failed run, reported as such.
 3. **Watch** three sources, merged into one timeline:
    - the process
-   - the client log (tailed, line-buffered)
+   - the client log (tailed from the log file, which is flushed on every line; the console output arrives in delayed chunks when redirected to a file)
    - the server event log (requests with bytes, how each transfer ended, and socket messages each way)
 4. **Drive** through the remote-control socket. The scenario API looks like this:
    ```python
@@ -186,7 +186,7 @@ A `pytest` plugin plus a small library.
    s.send("forward")
    s.wait_playing(timeout=20)
    ```
-5. **Quit.** A clean quit needs a new client feature: there's no `quit` remote-control event today, and the SIGTERM handlers just call `exit(0)`, so neither can support the "no `.tmp` files" invariant below. Add a `quit` event that the client honors **only when `INFINIDREAM_DATA_DIR` is set**, so a server can never quit a real user's app. It works the same on all three OSes.
+5. **Quit.** A clean quit needs a new client feature: there's no `quit` remote-control event today, and in testing SIGTERM simply killed the Mac app (exit -15), so neither can support the "no `.tmp` files" invariant below. Add a `quit` event that the client honors **only when `INFINIDREAM_DATA_DIR` is set**, so a server can never quit a real user's app. It works the same on all three OSes.
 6. **Verdicts:**
    - **Crash:** the process exits or is killed by a signal.
      - Mac: collect `~/Library/Logs/DiagnosticReports/infinidream*.ips`.
@@ -198,6 +198,7 @@ A `pytest` plugin plus a small library.
      - every cached `.mp4` matches its fixture md5
      - no `.tmp` files survive a clean quit
      - after all faults are cleared, playback resumes within N s
+     - the picture on screen isn't black or frozen during playback, and holds still while paused (see "Reading the screen")
    - **Artifacts:** `artifacts/<run-id>/` holds the client log, server event log, stacks or crash report, the scenario's action log, and the seed.
 
 ### Hang detection
@@ -211,6 +212,16 @@ There are three layers, because each existing signal misses something:
 | **Render heartbeat** (client prerequisite 3): no heartbeat for >3 s, or heartbeat frame index not advancing for >N s while not paused or buffering | a wedged render or decode loop, quickly | — |
 
 Buffering that never ends counts as a hang too: the heartbeat says "buffering" for longer than the fault scenario allows.
+
+## Reading the screen
+
+The heartbeat reports what the client thinks it drew. Reading pixels checks that independently. There are three levels, in the order to build them:
+
+1. **Screenshots about once a second** (working, Mac only). `screencapture -l` on the client's window catches a black or frozen picture. It needs Screen Recording permission for the terminal; without it the checks are skipped, and the test says so. Some dreams are legitimately dark, and crossfades can pass through dark frames, so "black" means near-zero brightness for several seconds. A paused client measured a difference of 0.00 between screenshots and a slow-moving dream about 0.5, so the threshold is 0.2.
+2. **Frame numbers in generated clips.** `fixtures.py synth` draws each frame's number as a small barcode, so the harness reads which frame is showing, not guesses from the picture. Skips, repeats, out-of-order frames and wrong dreams all become visible. These clips are tiny and need no hosting. At screenshot rate this already catches a wrong dream or a stuck clip.
+3. **Readback inside the client, on test runs only.** This gives per-frame accuracy, since an outside capture tool can drop frames itself at 30-60 fps. It needs code per renderer (Metal first) and must not slow rendering, or it causes the stutters being measured.
+
+A locked screen stops rendering, so rule that out first. Hosted Mac CI can't run Metal, so these checks need the dedicated Mac mini or Linux under Xvfb.
 
 ## Chaos mode
 
@@ -249,8 +260,8 @@ Then `analyze.py <log>` turns a run into a stutter report: stalls longer than 10
 
 | # | Deliverable | Done when |
 |---|---|---|
-| 0 | Client prerequisites: scheme override + plain `ws://`, `INFINIDREAM_DATA_DIR`, render heartbeat | A release build runs against `http://127.0.0.1` with a temp data directory |
-| 1 | Fake API, socket and media server (unshaped); fixtures via `import-cache` and `snapshot`; runner launch, ready gate, watch, crash and hang verdicts with artifacts; test-only `quit` event | A scripted "play a playlist, next ×5, quit" passes on Mac; a scripted malformed event reproduces the null-dereference crash with a crash report |
+| 0 | (client#735) Client prerequisites: scheme override + plain `ws://`, `INFINIDREAM_DATA_DIR`, render heartbeat | A release build runs against `http://127.0.0.1` with a temp data directory |
+| 1 | Mock API, socket and media server (unshaped), starting from the basic server and end-to-end test already in `client_generic/tests/mock-server/`; fixtures via `import-cache` and `snapshot`; runner launch, ready gate, watch, crash and hang verdicts with artifacts; test-only `quit` event | A scripted "play a playlist, next ×5, quit" passes on Mac; a scripted malformed event reproduces the null-dereference crash with a crash report |
 | 2 | Shaping (per-channel profiles, shared link, schedules, stalls) and media/API/socket faults; #728 scenario | The #728 scenario runs unattended. If it reproduces, we have stacks; if not, it runs as a regression test. The duplicate-download invariant is checked. Reconnect over plain `ws://` works after a server-side drop; #735 only tested connecting. |
 | 3 | Chaos mode with seeds and replay | Runs for 30 minutes unattended and produces artifacts on failure |
 | 4 | Frame-level logging (Phase 3) and `analyze.py` | Stutter report for a throttled run |
