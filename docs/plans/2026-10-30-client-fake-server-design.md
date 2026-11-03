@@ -36,7 +36,7 @@ Out of scope for now: the sign-in flow (magic link, WorkOS, refresh). The harnes
 
 1. Accept a scheme given in `settings.content.server` (`http://…` → plain HTTP, and plain `ws://` in `sio_beast.cpp`), log a warning that the connection is unencrypted, and over plain http send only the env API key, never a stored real login.
 2. `INFINIDREAM_DATA_DIR`, so that settings, cache and logs live in a temp directory per run.
-3. **A 1 Hz render heartbeat log line (new).** One `info` line per second from the render thread: current and next dream, frame index, queue depth, buffering/paused/transition state, and the wall-clock interval since the last tick. This is the most reliable hang signal, and the starting point for Phase 3. See "Hang detection" for why the other signals aren't enough.
+3. **A render heartbeat log line (new).** One `info` line from the render thread, every 10 s by default. The harness sets `INFINIDREAM_HEARTBEAT_SECONDS=1` to get 1 Hz, and the 10 s default keeps logs small on users' machines. Each line has: current and next dream, frame index, queue depth, buffering/paused/transition state, and the wall-clock interval since the last tick. This is the most reliable hang signal, and the starting point for Phase 3. See "Hang detection" for why the other signals aren't enough.
 
 The harness can start before (1) and (2) land, by having a developer point a Debug build at the server by hand. It can't run unattended until they do.
 
@@ -122,6 +122,8 @@ All faults can be targeted at one dream, at the Nth request, at Range requests o
 - slow headers
 - redirect chains (the client follows up to 5)
 
+The client limits how long a slow download can last: `ProgressiveHttpStream` sets `CURLOPT_LOW_SPEED_LIMIT` to 1 KB/s and `CURLOPT_LOW_SPEED_TIME` to 30 s. So a "forever" stall, or throttling below 1 KB/s, becomes a client abort after about 30 s, not a wedged download. Scenarios have to expect that abort, and a hang scenario like #728 has to keep watching well past 30 s, or it tests only the abort path.
+
 **API:**
 - 4xx/5xx per endpoint
 - a malformed body or wrong field types (`fps` as a number, `size` as a number, `frames` as a string, `status` ≠ processed)
@@ -169,12 +171,14 @@ A `pytest` plugin plus a small library.
 1. **Launch.**
    - Make `tmp/<run-id>/data/`.
    - Write `settings.json` there, with `settings.content.server = http://127.0.0.1:<port>`, logging on, and quota-relevant settings.
-   - Start the client binary with `INFINIDREAM_DATA_DIR` and `INFINIDREAM_API_KEY=test`. Binary paths per OS come from config; on Mac the harness runs `infinidream.app/Contents/MacOS/infinidream` directly.
-2. **Watch** three sources, merged into one timeline:
+   - Start the client binary with `INFINIDREAM_DATA_DIR`, `INFINIDREAM_API_KEY=test` and `INFINIDREAM_HEARTBEAT_SECONDS=1`. Binary paths per OS come from config; on Mac the harness runs `infinidream.app/Contents/MacOS/infinidream` directly, and on Windows it runs the windowed `.exe`, not the `.scr`.
+   - The key has to come from the env var: over `http` the client ignores `api_key` and `sealed_session` in `settings.json`. Don't set `settings.generator.nickname`, because magic link is tried before the API key.
+2. **Wait until ready.** Don't drive a scenario until the fake server has seen the client's `hello` and its socket CONNECT on `/remote-control`. The server sees both itself, so this doesn't depend on parsing client logs. Never becoming ready within a timeout is a failed run, reported as such.
+3. **Watch** three sources, merged into one timeline:
    - the process
    - the client log (tailed, line-buffered)
    - the server event log (requests with bytes, how each transfer ended, and socket messages each way)
-3. **Drive** through the remote-control socket. The scenario API looks like this:
+4. **Drive** through the remote-control socket. The scenario API looks like this:
    ```python
    s.play_dream(D)
    s.wait_log("DownloadRegistry: attach", dream=D, timeout=30)
@@ -182,7 +186,8 @@ A `pytest` plugin plus a small library.
    s.send("forward")
    s.wait_playing(timeout=20)
    ```
-4. **Verdicts:**
+5. **Quit.** A clean quit needs a new client feature: there's no `quit` remote-control event today, and the SIGTERM handlers just call `exit(0)`, so neither can support the "no `.tmp` files" invariant below. Add a `quit` event that the client honors **only when `INFINIDREAM_DATA_DIR` is set**, so a server can never quit a real user's app. It works the same on all three OSes.
+6. **Verdicts:**
    - **Crash:** the process exits or is killed by a signal.
      - Mac: collect `~/Library/Logs/DiagnosticReports/infinidream*.ips`.
      - Windows: launch under `procdump -e -ma`, or collect WER dumps.
@@ -226,7 +231,7 @@ Expected first catches: the #728 class (a seek onto a shared download that dies)
 
 This comes after crashes and hangs. The logging audit found the gaps; this is the minimum client work, roughly in priority order:
 
-1. **Render heartbeat** (also the hang signal): 1 Hz, always on. Per second it reports ticks, frames popped, discarded, and repeated, queue depth for the current and next clip, the maximum tick interval, and states.
+1. **Render heartbeat** (also the hang signal): always on, every 10 s by default and 1 Hz under the harness. Each line reports ticks, frames popped, discarded, and repeated, queue depth for the current and next clip, the maximum tick interval, and states.
 2. **Wall-clock durations.** The playback timeline freezes during a buffering pause, so today `m_TotalBufferingTime` is about 0 and is never read. Add `steady_clock` durations to:
    - "Buffer refilled" (rebuffer duration)
    - initial buffering
@@ -245,8 +250,8 @@ Then `analyze.py <log>` turns a run into a stutter report: stalls longer than 10
 | # | Deliverable | Done when |
 |---|---|---|
 | 0 | Client prerequisites: scheme override + plain `ws://`, `INFINIDREAM_DATA_DIR`, render heartbeat | A release build runs against `http://127.0.0.1` with a temp data directory |
-| 1 | Fake API, socket and media server (unshaped); fixtures via `import-cache` and `snapshot`; runner launch, watch, crash and hang verdicts with artifacts | A scripted "play a playlist, next ×5, quit" passes on Mac; a scripted malformed event reproduces the null-dereference crash with a crash report |
-| 2 | Shaping (per-channel profiles, shared link, schedules, stalls) and media/API/socket faults; #728 scenario | The #728 scenario runs unattended. If it reproduces, we have stacks; if not, it runs as a regression test. The duplicate-download invariant is checked. |
+| 1 | Fake API, socket and media server (unshaped); fixtures via `import-cache` and `snapshot`; runner launch, ready gate, watch, crash and hang verdicts with artifacts; test-only `quit` event | A scripted "play a playlist, next ×5, quit" passes on Mac; a scripted malformed event reproduces the null-dereference crash with a crash report |
+| 2 | Shaping (per-channel profiles, shared link, schedules, stalls) and media/API/socket faults; #728 scenario | The #728 scenario runs unattended. If it reproduces, we have stacks; if not, it runs as a regression test. The duplicate-download invariant is checked. Reconnect over plain `ws://` works after a server-side drop; #735 only tested connecting. |
 | 3 | Chaos mode with seeds and replay | Runs for 30 minutes unattended and produces artifacts on failure |
 | 4 | Frame-level logging (Phase 3) and `analyze.py` | Stutter report for a throttled run |
 | 5 | Windows and Linux runner support; Linux headless CI (Xvfb + lavapipe) | The same scenarios pass on all three |
@@ -254,5 +259,4 @@ Then `analyze.py <log>` turns a run into a stutter report: stalls longer than 10
 ## Open questions
 
 - **A test account for `snapshot`**, with a refillable quota, on alpha and stage.
-- **Is the heartbeat always on, or behind a flag?** At 1 line/s it's ~86k lines a day. I suggest always on but compact; the log already rotates daily.
 - **CI hardware for the Mac** (hardware decode and Metal can't run headless on a hosted runner). Probably a dedicated Mac mini.
