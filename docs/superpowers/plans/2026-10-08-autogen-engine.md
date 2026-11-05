@@ -16,7 +16,7 @@
 - **Account created by hand** (Spot, per env): the `autogen` user, its API key, and the output playlist. The CLI reads `API_KEY`/`PLAYLIST_UUID`/… from config and looks up its own user via `get_logged_user()` — **no provisioning script, no `AUTOGEN_USER_UUID`**.
 - **New API methods go in `edream_sdk` (python-api), general-purpose** (not autogen-specific). The SDK is pre-1.0; additive changes are fine, keep existing consumers (engines/video/electric-sheep) working.
 - **Generation pinned to `kling-25-i2v`**; `TEMPLATE_DREAM_UUID` is a Kling dream; Kling bills per video → honor `MAX_SPEND_PER_RUN`.
-- **Inputs are SFW** (the feed's default nsfw filter) and `status==processed`.
+- **Inputs are SFW** — enforced by the `autogen` account's **profile `nsfw=false`** flag (the feed keys off `user.nsfw`, not a request option; it's a hand-setup item) — and `status==processed`.
 - **No rate limiter / jitter / retry** — a failed call fails the run; re-run. **v1 is a manual CLI**; no Heroku/Procfile/Scheduler.
 - Pure functions take an injected `random.Random` (seeded) and `now: datetime`.
 - `pytest`; follow `engines` repo conventions where they exist.
@@ -27,7 +27,8 @@
 - **Everything already made / pool of 1** — `draw_pairs` hits its attempt cap and returns < N (possibly 0); never loops. (B3, B6)
 - **`DRY_RUN` safety** — no create / no playlist write under any input; still logs the cost estimate. (B6)
 - **Spending cap** — `n` never exceeds `floor(MAX_SPEND_PER_RUN / COST_PER_VIDEO)` nor `JOBS_PER_RUN`. (B6)
-- **In-flight guard + fail-fast** — skip when `autogen` has `> MAX_INFLIGHT` queue/processing dreams; raise before any create on template/playlist 404 or a non-Kling template. (B5, B6)
+- **In-flight guard + fail-fast** — skip when `autogen` has `> MAX_INFLIGHT` queue/processing dreams; raise before any create on template/playlist 404, a non-Kling template, or a template `duration ∉ {5,10}`. (B5, B6)
+- **Dedup doesn't decay as the playlist grows** — `existing_pairs` pages past 500 items; `get_dreams` is never called without a `userUUID`. (B5)
 
 ---
 
@@ -187,14 +188,14 @@ def load_config(env: Mapping[str, str]) -> Config:
 **Interfaces:** `Service(sdk)` wrapping the (extended) `edream_sdk` client. Methods:
 - `whoami() -> uuid` → `sdk.get_logged_user()`
 - `inflight_count(user_uuid) -> int` → two `get_dreams(user_uuid, status="queue"/"processing")` calls, summed
-- `get_template(uuid) -> dict` → `sdk.get_dream`; **validate** prompt is `kling-25-i2v` (raise if not)
+- `get_template(uuid) -> dict` → `sdk.get_dream`; **validate** prompt is `kling-25-i2v` **and `duration ∈ {5,10}`** (raise if not — the worker rejects other durations). Also derive `cost_per_video = 0.35 + 0.07 × duration` for the cost cap (config `COST_PER_VIDEO` is an optional override).
 - `candidate_images(max_pages) -> list[dict]` → page `get_feed(type="dream", media_type="image")`; keep `status=="processed"`; return uuid, playlist_count (len `playlistItems`), created_at, owner uuid
 - `feature_scores() -> dict[uuid,float]` → from `get_ranked_feed` + walking ranked playlists' items (only if `W_FEATURE>0`)
-- `existing_pairs(playlist_uuid) -> set[(start,end)]` → `get_playlist_items`; read `(source_dream_uuid,end_source_uuid)` from each item's prompt; **skip** items missing either
+- `existing_pairs(playlist_uuid) -> set[(start,end)]` → `get_playlist_items` **paged to exhaustion** (items cap at 500/page — a single page silently misses older pairs as the playlist grows, re-generating them); read `(source_dream_uuid,end_source_uuid)` from each item's prompt; **skip** items missing either
 - `create(name, prompt) -> uuid` → `sdk.create_dream_from_prompt`
-- `add_to_playlist(playlist_uuid, uuids)` → `sdk.add_playlist_items` (batch)
+- `add_to_playlist(playlist_uuid, uuids)` → `sdk.add_playlist_items` (atomic batch); **on batch failure (e.g. 409 duplicate → whole batch dropped), fall back to adding items one at a time** so one bad item doesn't drop all
 
-- [ ] **Step 1: Write failing tests** with a fake `sdk` — inflight sums two calls; template validation raises on non-Kling; candidate filtering (processed-only); existing_pairs skips prompts missing source/end; create/add pass through. **Step 2: Run → fail.** **Step 3: Implement.** **Step 4: Run → pass.** **Step 5: Commit** `feat: edream_sdk service layer`.
+- [ ] **Step 1: Write failing tests** with a fake `sdk` — inflight sums two calls **and never calls `get_dreams` without a `userUUID`** (guard: a bare call matches all users); template validation raises on non-Kling **or non-{5,10} duration**, and derives cost from duration; candidate filtering (processed-only); `existing_pairs` pages to exhaustion (fake returns 2 pages) and skips prompts missing source/end; `add_to_playlist` falls back to per-item on batch failure. **Step 2: Run → fail.** **Step 3: Implement.** **Step 4: Run → pass.** **Step 5: Commit** `feat: edream_sdk service layer`.
 
 ---
 
@@ -202,7 +203,7 @@ def load_config(env: Mapping[str, str]) -> Config:
 
 **Files:** `autogen_engine/run.py`; `tests/test_run.py`.
 
-**Interfaces:** `run(service, config, now, rng) -> RunSummary` — `whoami()` → in-flight guard (skip if `> max_inflight`) → `get_template` (fail-fast; validates Kling) → `existing_pairs` (dedup `already` + `connected`) → `candidate_images` (drop owner==self) → optional `feature_scores` → assemble `ImageSignals` → `popularity()` → `draw_pairs()` → **cost cap** `n = min(jobs_per_run, floor(max_spend_per_run / cost_per_video))` (0 if `cost_per_video<=0`) → for each of `n` pairs unless `dry_run`: `build_kling_prompt` → `service.create` (name `autogen <s8>→<e8>`) → collect; `add_to_playlist` at end. Returns `{pool, drawn, est_cost, created, skipped_inflight, dry_run}`. A `create` failure for one pair is caught/counted; template/playlist 404 or non-Kling template raises before any create.
+**Interfaces:** `run(service, config, now, rng) -> RunSummary` — `whoami()` → in-flight guard (skip if `> max_inflight`) → `get_template` (fail-fast; validates Kling) → `existing_pairs` (dedup `already` + `connected`) → `candidate_images` (drop owner==self) → optional `feature_scores` → assemble `ImageSignals` → `popularity()` → `draw_pairs()` → **cost cap** using the template-derived `cost_per_video` (`0.35 + 0.07×duration`, or `COST_PER_VIDEO` override): `n = min(jobs_per_run, floor(max_spend_per_run / cost_per_video))` (0 if `cost_per_video<=0` or `max_spend_per_run<=0`) → for each of `n` pairs unless `dry_run`: `build_kling_prompt` → `service.create` (name `autogen <s8>→<e8>`) → collect; `add_to_playlist` at end. Returns `{pool, drawn, est_cost, created, skipped_inflight, dry_run}`. A `create` failure for one pair is caught/counted; template/playlist 404 or non-Kling template raises before any create.
 
 - [ ] **Step 1: Write failing tests** with a fake service:
   - in-flight over cap → `skipped_inflight`, no creates;
@@ -234,7 +235,7 @@ def load_config(env: Mapping[str, str]) -> Config:
 
 **Files:** `README.md`.
 
-- [ ] **Step 1: Document running it** — install (`pip install -e .` + `edream_sdk` ref), config via env / `.env` (table from the spec; set `COST_PER_VIDEO`/`MAX_SPEND_PER_RUN`), run `python -m autogen_engine`. Note the hand-created `autogen` account/key/playlist + a Kling `TEMPLATE_DREAM_UUID`.
+- [ ] **Step 1: Document running it** — install (`pip install -e .` + `edream_sdk` ref), config via env / `.env` (table from the spec; set `MAX_SPEND_PER_RUN`; `COST_PER_VIDEO` optional — derived from the template otherwise), run `python -m autogen_engine`. **Hand-setup checklist:** create the `autogen` account as a **creator** with **profile `nsfw=false`** (this is what enforces SFW inputs), issue its API key, create the output playlist, and pick a Kling (`kling-25-i2v`, duration 5/10) `TEMPLATE_DREAM_UUID`. **Loud note:** with `MAX_SPEND_PER_RUN` unset/0, a `DRY_RUN=false` run creates **zero** videos by design (fail-safe) and only logs it — set the cap to actually generate.
 - [ ] **Step 2: Document rollout** — (1) `DRY_RUN=true` (default): score/draw/log est cost, create nothing; (2) `DRY_RUN=false`, small `JOBS_PER_RUN` + `MAX_SPEND_PER_RUN`: generate a few, eyeball the `autogen` account + playlist; (3) raise caps as trust grows. Cloud/scheduling is a later, separate decision.
 - [ ] **Step 3: Commit** `docs: run-by-hand + rollout`.
 

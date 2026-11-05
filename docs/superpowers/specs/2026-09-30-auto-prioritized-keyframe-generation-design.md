@@ -10,7 +10,9 @@ CLI/batch infra. Design doc lives in metarepo until the repo exists.
 >   flow app defaults to `kling-25-i2v`, Kling 2.5 Turbo Pro, 5 s). Pin `kling-25-i2v`; make
 >   `TEMPLATE_DREAM_UUID` a **Kling** dream. The worker already maps `source_dream_uuid`/
 >   `end_source_uuid` to Kling's start/end images, so the prompt shape is unchanged. Kling runs
->   on **fal, billed per video** → add a **per-run cost estimate + spending cap**.
+>   on **fal**, priced `baseUsd 0.35 + usdPerSecond 0.07 × duration`
+>   (`models.constants.ts`) → ~$0.70 at the pinned 5 s, $1.05 at 10 s. Add a **per-run cost
+>   estimate (derived from the template's `duration`) + a hard spending cap**.
 > - **No provisioning script.** Spot creates the `autogen` account, its API key, and the output
 >   playlist **by hand per env**. Drop the backend provisioning task and `AUTOGEN_USER_UUID`;
 >   look up the key's own user at startup via `edream_sdk.get_logged_user()` (`GET /auth/user`).
@@ -31,8 +33,11 @@ CLI/batch infra. Design doc lives in metarepo until the repo exists.
 >   endpoint (Deferred).
 > - **No discovery exclusion** (Risk 2b resolved): `autogen` is treated like any regular user;
 >   no hiding, no C0.
-> - **Content safety** (Risk 2 resolved): restrict inputs to **SFW** via the feed's nsfw filter
->   (leave `nsfw` off → feed returns `nsfw:false` only).
+> - **Content safety** (Risk 2 resolved): inputs are **SFW**. Important: the feed's nsfw filter
+>   is driven by the **authenticated account's own `user.nsfw` profile flag**
+>   (`feed.controller.ts` passes `user?.nsfw`), *not* a client request option — so the hand
+>   setup **must set the `autogen` account's profile `nsfw = false`** (same for playlist-item
+>   reads). This is on the provisioning checklist, not something the engine toggles.
 > - **Backend endpoints:** v1 uses existing ones; new ones may come later but must be
 >   **general-purpose** ("dreams derived from X"), not autogen-specific.
 
@@ -113,8 +118,12 @@ python -m autogen_engine   (manual; config from env/.env; DRY_RUN default true)
 signal is therefore: an image's popularity = the engagement (votes + playlist-adds) of the
 **videos derived from it** (videos whose prompt lists it as `source_dream_uuid`/`end_source_uuid`).
 The public feed does **not** return `prompt`, so tracing those videos per image is not cheap today
-(and some links exist only via `startKeyframe`/`endKeyframe`). **Confirm which apps write
-`source_dream_uuid`** — the flow app does (`build-video-algo-params.ts`); others TBD.
+(and some links exist only via `startKeyframe`/`endKeyframe`). Authorship, confirmed: **flow +
+batch video gen** write `source_dream_uuid`/`end_source_uuid` as frame-derivation
+(`build-video-algo-params.ts`, used by `useFlowGeneration`/`useBatchSubmit`); but **image gen
+also writes `source_dream_uuid` as a *style reference*** (`build-image-algo-params.ts`) — the
+field is overloaded, so a future trace must disambiguate video-derivation from image style-ref
+(and also fold in the `startKeyframe`/`endKeyframe` FK links).
 
 - **v1 (no trace available):** `popularity(d)` = `w_playlist · playlistAdds(d)` + `w_recency ·
   recency(d)` (+ optional `w_feature · featureScore(d)`), each min-max scaled to [0,1] across the
@@ -129,8 +138,9 @@ The public feed does **not** return `prompt`, so tracing those videos per image 
 The main feed is a **global public gallery for any user** (not caller-scoped):
 `buildFeedConditions()` (`backend/src/utils/feed.util.ts`) OR's the caller's own `hidden:true`
 dreams with **all `hidden:false` dreams, no owner filter** — so `autogen` sees every user's
-non-hidden images. Narrowing: `hidden:true` (others' → excluded); **SFW only** (leave the feed's
-`nsfw` option off → `nsfw:false` rows only — this is the content-safety control, Risk 2);
+non-hidden images. Narrowing: `hidden:true` (others' → excluded); **SFW only** — the feed filters
+nsfw by the **caller account's `user.nsfw` profile flag** (not a request param), so the `autogen`
+account's profile must be `nsfw=false` (content-safety control, Risk 2; on the setup checklist);
 `status==processed` (client-side; the feed applies no status filter but returns `status`); a
 `FeedItem` row must exist (dry-run pool size exposes gaps); and **self-exclusion** (drop
 `user.uuid == self`). Reported images are **not** excluded.
@@ -156,7 +166,8 @@ give long-tail images a chance. Tunables: `JOBS_PER_RUN` (`N`), `CONNECTIVITY_K`
 `prompt`, force `infinidream_algorithm: "kling-25-i2v"`, set `source_dream_uuid = start` and
 `end_source_uuid = end`, leave the rest (prompt text, `duration`, `cfg_scale`, etc.) intact — the
 worker maps the two source uuids to Kling's start/end frames. Accepts a dict or JSON-string prompt.
-**Startup validation:** the template dream's prompt must already be `kling-25-i2v`; else fail-fast.
+**Startup validation:** the template dream's prompt must already be `kling-25-i2v` **and carry a
+`duration` of 5 or 10** (the worker rejects other durations — `fal-handlers.ts`); else fail-fast.
 The created dream's `name` is deterministic, e.g. `autogen <start8>→<end8>`.
 
 ## Dedup & in-flight (no extra storage)
@@ -164,6 +175,8 @@ The created dream's `name` is deterministic, e.g. `autogen <start8>→<end8>`.
 - **Dedup = the output playlist.** `(source,end)` pairs already present are the dedup set; a drawn
   pair in it is redrawn. Delete a dream from the playlist → its pair can regenerate (manual redo).
   When reading items, **skip any whose prompt lacks both source/end uuids** (hand-added/non-i2v).
+  **Page the playlist to exhaustion** (items cap at 500/page) — a single page would silently miss
+  older pairs as the playlist grows and re-generate them.
 - **In-flight guard.** No single "my dreams by status" endpoint (`/my-dreams` has no status
   filter; `GET /v1/dream` takes a `userUUID` param + single status). Count with two calls
   (`…&status=queue`, `…&status=processing`) using the uuid from `get_logged_user()`; skip the run
@@ -171,10 +184,13 @@ The created dream's `name` is deterministic, e.g. `autogen <start8>→<end8>`.
 
 ## Cost estimate & spending cap
 
-Kling (fal) bills per video. Config carries a `COST_PER_VIDEO` estimate (USD). Each run computes
-`estimated_spend = n × COST_PER_VIDEO` and **caps `n = min(JOBS_PER_RUN, floor(MAX_SPEND_PER_RUN /
-COST_PER_VIDEO))`**. `DRY_RUN` logs the estimate and creates nothing. (This is a client-side guard;
-the backend may also enforce its own credit limits on the `autogen` account.)
+Kling (fal) is priced `baseUsd 0.35 + usdPerSecond 0.07 × duration` (`models.constants.ts`), so
+cost is deterministic per run once the template's `duration` is known. **Derive** the per-video
+cost at startup from the template dream's `duration` (`0.35 + 0.07 × duration`) rather than
+trusting a stale constant — `COST_PER_VIDEO` is an optional override only. Each run caps
+`n = min(JOBS_PER_RUN, floor(MAX_SPEND_PER_RUN / cost_per_video))` (and `0` if `cost_per_video <=
+0`), computes `estimated_spend = n × cost_per_video`, and `DRY_RUN` logs the estimate + creates
+nothing. Client-side guard; the backend may also enforce its own credit limits on `autogen`.
 
 ## Config
 
@@ -212,7 +228,9 @@ later decision.
 ## Risks / open decisions (Spot's answers folded in)
 
 1. **Account provisioning** — resolved: created by hand per env (only two deployments).
-2. **Content safety** — resolved: inputs restricted to **SFW** via the feed's nsfw filter.
+2. **Content safety** — resolved: inputs are **SFW**, enforced by the feed's nsfw filter which
+   keys off the **`autogen` account's own `user.nsfw=false` profile flag** (set it in the hand
+   setup — not a request option the engine controls).
 3. **featureRank coverage** — thin (featured content is mostly videos); keep `W_FEATURE` low or 0.
    *Extension:* allow **any dream, including videos, as a start frame** by extracting a frame
    (thumbnail/filmstrip) — a promising general feature beyond autogen (Deferred).
@@ -228,7 +246,9 @@ later decision.
 - **Derived-video engagement signal + endpoint.** A general-purpose backend endpoint "dreams
   derived from uuid X" (by `source_dream_uuid`/`end_source_uuid`, and/or `startKeyframe`/
   `endKeyframe`) + an `edream_sdk` method, so image popularity reflects its videos' votes/adds
-  without client-side prompt scraping. Confirm which apps write `source_dream_uuid` first.
+  without client-side prompt scraping. The endpoint must disambiguate frame-derivation (flow +
+  batch video) from image gen's style-ref use of `source_dream_uuid`, and include the
+  `startKeyframe`/`endKeyframe` FK links.
 - **Any dream (incl. video) as a start frame** via frame extraction (thumbnail/filmstrip) — widens
   the candidate pool and the featureRank coverage; useful platform-wide.
 - **LTX branches alongside Kling connections.** LTX is cheaper but branches off a single start
