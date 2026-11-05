@@ -82,17 +82,22 @@ python -m autogen_engine   (manual; config from env/.env; DRY_RUN default true)
   2. template     — GET /v1/dream/:TEMPLATE_DREAM_UUID → base prompt; validate it IS kling-25-i2v
   3. existing     — GET /v1/playlist/:PLAYLIST_UUID/items → each item's prompt →
                     set of (source_dream_uuid,end_source_uuid) already made  [dedup + connectivity]
-  4. pool         — GET /v1/feed?type=dream&mediaType=image (paged ≤ MAX_FEED_PAGES) → images w/
+  4. pool         — GET /v1/feed?type=dream&mediaType=image (paged to exhaustion ≤ MAX_FEED_PAGES;
+                    mediaType is REQUIRED — type=dream alone defaults to VIDEO) → images w/
                     playlistItems, status, created_at (feed omits votes+prompt; SFW only);
                     keep status==processed; drop autogen-owned (self-exclusion)
   5. feature      — (optional, W_FEATURE>0) GET /v1/feed/ranked → walk ranked playlists' items →
                     per-image feature score by ORDER (featureRank value stripped; order kept)
-  6. popularity() [pure]  v1 = playlist-adds + recency (+ feature); scaled 0–1 + floor
-  7. draw_pairs() [pure]  weighted lottery w(d)=pop(d)*(1+k*connected(d)); skip self/dup/already
-  8. cost guard   — n = min(JOBS_PER_RUN, floor(MAX_SPEND_PER_RUN / COST_PER_VIDEO)); log estimate
+  6. popularity() [pure]  v1 = playlistCount + recency (+ feature); scaled 0–1 + floor
+  7. draw_pairs() [pure]  w(d)=pop(d)*(1+k*min(connected,CAP)); skip self/dup/already/usage-cap/
+                    aspect-incompatible
+  8. cost guard   — cost/video derived from template duration (0.35+0.07*dur); n = min(JOBS_PER_RUN,
+                    floor(MAX_SPEND_PER_RUN / cost)); 0 if cost<=0 or cap<=0; log estimate
   9. for each of n pairs (unless DRY_RUN):
         prompt = build_kling_prompt(template_prompt, start, end)   [pure]
-        POST /v1/dream (as autogen) → dreamUuid ; add to PLAYLIST_UUID (batch at end)
+        POST /v1/dream (as autogen) → dreamUuid ; add it to PLAYLIST_UUID *right away*
+        (incremental, not one batch at end — so a crash can't leave created-but-unlisted
+        dreams that a re-run would regenerate & re-bill)
  10. log summary (pool / drawn / est_cost / created / skipped)
 ```
 
@@ -104,10 +109,10 @@ python -m autogen_engine   (manual; config from env/.env; DRY_RUN default true)
 | In-flight guard | `GET /v1/dream?userUUID=<self>&status=queue` + `&status=processing` | **exists** |
 | Template prompt | `GET /v1/dream/:TEMPLATE_DREAM_UUID` | **exists** |
 | Existing pairs (state) | `GET /v1/playlist/:PLAYLIST_UUID/items` — items include each dream's `prompt` | **exists** |
-| Candidate pool | `GET /v1/feed?type=dream&mediaType=image` (paged) — `playlistItems`,`status`,`created_at` (no votes/prompt); SFW only; filter `status==processed` client-side | **exists** |
+| Candidate pool | `GET /v1/feed?type=dream&mediaType=image` (paged; **`mediaType` REQUIRED** — `type=dream` alone defaults to VIDEO) — `playlistItems`,`status`,`created_at` (no votes/prompt); SFW only; filter `status==processed` client-side | **exists** (needs `media_type` arg added to the SDK's `get_feed`) |
 | Feature stand-in | `GET /v1/feed/ranked` — featured playlists in `featureRank` order (value stripped, order kept) | **exists** |
 | Create generation | `POST /v1/dream` | **exists** (needs `CREATOR_GROUP` — the hand-made `autogen` account is a creator) |
-| Add to playlist | `POST /v1/playlist/:uuid/items` (atomic batch ≤500) | **exists** |
+| Add to playlist | `edream_sdk.add_items_to_playlist` → `POST /v1/playlist/:uuid/items` (atomic, all-or-none; ≤500) | **exists in SDK** — add *freshly-created* uuids only, so the all-or-none contract never trips (no per-item fallback needed) |
 
 **No backend changes for v1** — all existing. New endpoints may come later (Deferred) but must be
 **general-purpose** (e.g. "dreams derived from uuid X"), with matching `edream_sdk` methods.
@@ -125,10 +130,14 @@ also writes `source_dream_uuid` as a *style reference*** (`build-image-algo-para
 field is overloaded, so a future trace must disambiguate video-derivation from image style-ref
 (and also fold in the `startKeyframe`/`endKeyframe` FK links).
 
-- **v1 (no trace available):** `popularity(d)` = `w_playlist · playlistAdds(d)` + `w_recency ·
+- **v1 (no trace available):** `popularity(d)` = `w_playlist · playlistCount(d)` + `w_recency ·
   recency(d)` (+ optional `w_feature · featureScore(d)`), each min-max scaled to [0,1] across the
-  run + a floor. `playlistAdds` and `created_at` come straight from the feed — **no per-image
-  calls**.
+  run + a floor. `playlistItems` and `created_at` come straight from the feed — **no per-image
+  calls**. **Honest framing:** `playlistItems` is *current playlist memberships*, not historical
+  adds, and most user stills sit in zero playlists — so in practice v1 ranking is
+  **recency-dominated** (≈ recent images + connectivity + floor randomness), not true
+  "engagement." Treat the engagement framing as aspirational until the Phase C derived-video
+  signal lands; this is fine for a library-growth experiment but say so plainly.
 - **Later:** add a `w_votes` term fed by a general-purpose backend endpoint that returns dreams
   derived from a given uuid (Deferred / Phase C), so image popularity reflects its videos'
   engagement without client-side prompt scraping.
@@ -148,17 +157,33 @@ account's profile must be `nsfw=false` (content-safety control, Risk 2; on the s
 ## Selection — weighted lottery (pure)
 
 1. `popularity(d)` — as above (0–1 scaled + floor).
-2. `connected(d)` — times `d` appears as a start/end in the output playlist's pairs.
-3. `w(d) = popularity(d) × (1 + k · connected(d))`.
-4. For each of `N` draws: pick start + end ∝ `w`; **redraw** on `start==end` or a pair already in
-   the playlist. If no fresh valid pair within a bounded `max_attempts` (pool of 1, everything
-   made), **stop and return fewer than `N` (possibly 0)** — never loop. Floor applied **before**
-   normalization (no divide-by-zero on all-zero signals).
+2. `connected(d)` — times `d` appears as a start/end in the output playlist's pairs, **saturated**
+   `min(connected(d), CONNECTED_CAP)` (or `log1p`) so weight can't compound without bound.
+3. `w(d) = popularity(d) × (1 + k · saturated_connected(d))`.
+4. For each of `N` draws: pick start + end ∝ `w`; **redraw** on `start==end`, a pair already in the
+   playlist, a pair whose two images are **aspect-ratio incompatible** (see below), or an image
+   that has already hit its **per-run usage cap** `USAGE_CAP` (no single image in more than
+   `USAGE_CAP` pairs this run). If no fresh valid pair within a bounded `max_attempts` (pool of 1,
+   everything made), **stop and return fewer than `N` (possibly 0)** — never loop. Floor applied
+   **before** normalization (no divide-by-zero).
+
+**Rich-get-richer guard.** `w = pop · (1 + k·connected)` is self-reinforcing — without limits a
+run can spend its whole budget wiring up the same ~5 images. The saturating `connected` + the
+per-run `USAGE_CAP` bound concentration. A `draw_pairs` test asserts **no single image exceeds a
+set share of the N pairs**.
 
 `k` biases toward already-used images so videos link into a connected graph; floor + randomness
-give long-tail images a chance. Tunables: `JOBS_PER_RUN` (`N`), `CONNECTIVITY_K` (`k`), weights,
-`HALF_LIFE_DAYS`. Draw takes an injected `random.Random` (seeded) for deterministic tests.
-(Selection/generation details are the implementer's call.)
+give long-tail images a chance. Tunables: `JOBS_PER_RUN` (`N`), `CONNECTIVITY_K` (`k`),
+`CONNECTED_CAP`, `USAGE_CAP`, weights, `HALF_LIFE_DAYS`. Draw takes an injected `random.Random`
+(seeded) for deterministic tests.
+
+**Aspect-ratio compatibility.** The worker **rejects a pair whose start/end images normalize to
+different sizes** (`worker/src/.../fal-handlers.ts`), so arbitrary pairing would produce many
+failed renders. The feed does **not** return image dimensions, so v1 can't bucket by aspect ratio
+without extra data. **v1 stance:** accept-and-log mismatch failures (confirm whether the worker
+rejects *before* submitting to fal — if so there's no fal $, just a failed dream that stays in the
+output playlist and so won't be retried). **Fix (Deferred):** expose image dimensions (a feed
+field or a per-candidate fetch) and pair only within an aspect bucket.
 
 ## Prompt building (pure)
 
@@ -195,8 +220,10 @@ nothing. Client-side guard; the backend may also enforce its own credit limits o
 ## Config
 
 `BACKEND_API`, `API_KEY`, `TEMPLATE_DREAM_UUID` (a Kling dream), `PLAYLIST_UUID`, `DRY_RUN`
-(default `true`), `JOBS_PER_RUN`, `CONNECTIVITY_K`, weights (`W_PLAYLIST`/`W_RECENCY`/`W_FEATURE`),
-`HALF_LIFE_DAYS`, `MAX_INFLIGHT`, `COST_PER_VIDEO`, `MAX_SPEND_PER_RUN`, `MAX_FEED_PAGES`.
+(default `true`), `JOBS_PER_RUN`, `CONNECTIVITY_K`, `CONNECTED_CAP`, `USAGE_CAP`, weights
+(`W_PLAYLIST`/`W_RECENCY`/`W_FEATURE`), `HALF_LIFE_DAYS`, `MAX_INFLIGHT`, `MAX_SPEND_PER_RUN`,
+`COST_PER_VIDEO` (optional override — otherwise derived from the template's `duration`),
+`MAX_FEED_PAGES`.
 (Dropped vs v5: `AUTOGEN_USER_UUID` — use `get_logged_user()`; `W_VOTES` — v1 has no image votes;
 `STARTUP_JITTER_SECONDS`/`MAX_RPS`/`RETRY_MAX`/`SHORTLIST_SIZE` — no limiter, no per-image vote
 fetch.) The `autogen` account + its API key + the output playlist are created **by hand per env**.
@@ -240,6 +267,18 @@ later decision.
    working unless something was genuinely wrong.
 6. **Kling cost** — real; bounded by `MAX_SPEND_PER_RUN` + `DRY_RUN`. LTX would be cheaper but only
    branches from a single start frame (no two-image connection) — see Deferred.
+7. **Aspect-ratio pairing failures** (Important) — the lottery pairs arbitrary images; the worker
+   rejects mismatched start/end sizes, so expect a real render-failure rate. v1 accepts-and-logs;
+   **confirm the worker rejects *before* fal submission** (no $ if so). Fix = pair within aspect
+   buckets once dimensions are available (Deferred).
+8. **Backend credit backstop** (confirm) — the client-side cap guards a hand-run CLI, but one
+   fat-fingered `MAX_SPEND_PER_RUN` spends real fal dollars. Confirm the `autogen` account has a
+   sane server-side `dailyQuotaUsd`/credit limit as a second line of defense.
+9. **Create→render failure** — a dream that *creates* fine but later *fails rendering* is already
+   in the output playlist (we add on create), so its pair won't retry. Intended (don't re-attempt
+   a bad pair), but note it; its fal cost depends on where the failure occurred.
+10. **Pool ceiling** — `MAX_FEED_PAGES × 500` caps the candidate pool to the newest N images
+    (feed is `created_at DESC`); log when the cap is hit so silent truncation is visible.
 
 ## Deferred / future
 

@@ -37,16 +37,14 @@
 **Repo:** `python-api` (branch off its default; keep existing consumers working).
 **Files:** add methods to the SDK client (e.g. `src/edream_sdk/client/*`); tests alongside the repo's existing SDK tests.
 
-**Interfaces (add only what's missing — verify current coverage first):**
-- `get_logged_user()` → `GET /auth/user` (the key's own user) — if not already present.
-- `get_dream(uuid)`, `create_dream_from_prompt({name, prompt})` — likely already present; confirm.
-- `get_feed(media_type=None, type=None, take, skip)` → `GET /v1/feed` (supports `type=dream`, `mediaType=image`).
-- `get_ranked_feed(take, skip)` → `GET /v1/feed/ranked`.
-- `get_dreams(user_uuid=None, status=None, take, skip)` → `GET /v1/dream` (single `status` enum; `userUUID` param).
-- `get_playlist_items(uuid, take, skip)` → `GET /v1/playlist/:uuid/items` (items include each dream's `prompt`).
-- `add_playlist_items(uuid, items)` → `POST /v1/playlist/:uuid/items` (atomic batch ≤500).
+**Already in the SDK (verified; reuse as-is):** `get_logged_user()` (`GET /auth/user`), `get_dream(uuid)`, `create_dream_from_prompt({name, prompt})` (returns the dream incl. `uuid`), `get_playlist_items(uuid, …)` (items include each dream's `prompt`), **`add_items_to_playlist(uuid, items)`** (`POST /v1/playlist/:uuid/items`, atomic all-or-none ≤500 — do **not** re-add or wrap it).
 
-- [ ] **Step 1: Inventory** `edream_sdk` — list which of the above already exist (grep the client). Only add the gaps. Keep signatures general-purpose (no autogen naming).
+**Gaps to ADD (general-purpose, no autogen naming):**
+- `get_feed(take, skip, *, type=None, media_type=None)` → `GET /v1/feed`. **`media_type` is essential** — `type=dream` with no `mediaType` defaults to VIDEO, so without this arg the pool is videos, not images.
+- `get_ranked_feed(take, skip)` → `GET /v1/feed/ranked` (if not present).
+- `get_dreams(take, skip, *, user_uuid, status)` → `GET /v1/dream` (single `status` enum; `userUUID` param). **Require `user_uuid`** — a bare call (`userUUID` undefined) drops the user filter and returns *all users'* dreams.
+
+- [ ] **Step 1: Inventory** `edream_sdk` — confirm the "already present" list by grepping the client; only add the three gaps. Keep signatures general-purpose.
 - [ ] **Step 2: Write failing tests** (mocked HTTP) for each new method — path/verb/query, `Authorization: Api-Key` header, response parsing.
 - [ ] **Step 3: Run → fail.**
 - [ ] **Step 4: Implement** the new methods.
@@ -114,6 +112,8 @@ class Config:
     dry_run: bool = True
     jobs_per_run: int = 10
     connectivity_k: float = 1.0
+    connected_cap: int = 3       # saturate connected() so weight can't compound without bound
+    usage_cap: int = 4           # max pairs any one image can appear in per run
     half_life_days: float = 30.0
     max_inflight: int = 100
     max_feed_pages: int = 20
@@ -133,6 +133,8 @@ def load_config(env: Mapping[str, str]) -> Config:
         dry_run=(env.get("DRY_RUN", "true").lower() != "false"),
         jobs_per_run=_num(env, "JOBS_PER_RUN", 10),
         connectivity_k=_num(env, "CONNECTIVITY_K", 1.0),
+        connected_cap=_num(env, "CONNECTED_CAP", 3),
+        usage_cap=_num(env, "USAGE_CAP", 4),
         half_life_days=_num(env, "HALF_LIFE_DAYS", 30.0),
         max_inflight=_num(env, "MAX_INFLIGHT", 100),
         max_feed_pages=_num(env, "MAX_FEED_PAGES", 20),
@@ -152,7 +154,7 @@ def load_config(env: Mapping[str, str]) -> Config:
 
 **Files:** `autogen_engine/scoring.py`; `tests/test_scoring.py`.
 
-**Interfaces:** `popularity(images: list[ImageSignals], weights, half_life_days, now) -> dict[str,float]`; `ImageSignals = {uuid, playlist_count, feature_score, updated_at}` (no votes in v1 — images have none; derived-video votes are a later term). Each term min-max→[0,1], weighted, + a floor so no score is 0.
+**Interfaces:** `popularity(images: list[ImageSignals], weights, half_life_days, now) -> dict[str,float]`; `ImageSignals = {uuid, playlist_count, feature_score, created_at}` (use `created_at` for recency — "newer images" — not `updated_at`; no votes in v1 — images have none; derived-video votes are a later term). Each term min-max→[0,1], weighted, + a floor so no score is 0. **Note:** `playlist_count` is *current memberships* (from the feed), not historical adds — in practice recency dominates v1 ranking.
 
 - [ ] **Step 1: Write failing tests** — empty→{}; more playlist-adds ranks higher; fresher recency higher; floor makes all-zero equal + non-zero; deterministic given fixed `now`.
 - [ ] **Step 2: Run → fail.** **Step 3: Implement** (min-max helper, recency `exp(-age/half)`, `FLOOR=0.01`). **Step 4: Run → pass.** **Step 5: Commit** `feat: popularity (adds+recency+feature)`.
@@ -163,9 +165,9 @@ def load_config(env: Mapping[str, str]) -> Config:
 
 **Files:** `autogen_engine/selection.py`; `tests/test_selection.py`.
 
-**Interfaces:** `draw_pairs(popularity, connected, already, n, k, rng, max_attempts=1000) -> list[tuple[str,str]]` — `w(d)=popularity[d]*(1+k*connected.get(d,0))`; draw start/end ∝ w; skip `start==end` / pair in `already` / dup this run; stop at `n` or `max_attempts` (bounded). Deterministic given `rng`.
+**Interfaces:** `draw_pairs(popularity, connected, already, n, k, rng, *, connected_cap, usage_cap, compatible=None, max_attempts=1000) -> list[tuple[str,str]]` — `w(d)=popularity[d]*(1+k*min(connected.get(d,0), connected_cap))` (**saturated** so weight can't compound without bound); draw start/end ∝ w; skip `start==end` / pair in `already` / dup this run / either image already in `usage_cap` pairs this run / `compatible(start,end)` is False (aspect-ratio hook; default always-True in v1); stop at `n` or `max_attempts` (bounded). Deterministic given `rng`.
 
-- [ ] **Step 1: Write failing tests** — no self-pairs; skips already-made; honors `n` + deterministic; connectivity bias favors connected; bounded when exhausted (pool of 1 / all-made → ≤ available, no loop).
+- [ ] **Step 1: Write failing tests** — no self-pairs; skips already-made; honors `n` + deterministic; connectivity bias favors connected but **saturates** (an image with connected=100 isn't weighted wildly more than connected=`connected_cap`); **no single image exceeds `usage_cap` pairs in the output** (rich-get-richer guard); `compatible` predicate excludes incompatible pairs; bounded when exhausted (pool of 1 / all-made → ≤ available, no loop).
 - [ ] **Step 2: Run → fail.** **Step 3: Implement** (`rng.choices`, dedupe, attempt cap). **Step 4: Run → pass.** **Step 5: Commit** `feat: connectivity-biased weighted-lottery pairing`.
 
 ---
@@ -192,8 +194,9 @@ def load_config(env: Mapping[str, str]) -> Config:
 - `candidate_images(max_pages) -> list[dict]` → page `get_feed(type="dream", media_type="image")`; keep `status=="processed"`; return uuid, playlist_count (len `playlistItems`), created_at, owner uuid
 - `feature_scores() -> dict[uuid,float]` → from `get_ranked_feed` + walking ranked playlists' items (only if `W_FEATURE>0`)
 - `existing_pairs(playlist_uuid) -> set[(start,end)]` → `get_playlist_items` **paged to exhaustion** (items cap at 500/page — a single page silently misses older pairs as the playlist grows, re-generating them); read `(source_dream_uuid,end_source_uuid)` from each item's prompt; **skip** items missing either
+- `candidate_images` passes **`media_type="image"`** to `get_feed` (required) and asserts returned items are `mediaType=="image"` (fail loud if not)
 - `create(name, prompt) -> uuid` → `sdk.create_dream_from_prompt`
-- `add_to_playlist(playlist_uuid, uuids)` → `sdk.add_playlist_items` (atomic batch); **on batch failure (e.g. 409 duplicate → whole batch dropped), fall back to adding items one at a time** so one bad item doesn't drop all
+- `add_to_playlist(playlist_uuid, uuids)` → `sdk.add_items_to_playlist` as-is. **No per-item fallback** — we only ever add freshly-created uuids, so the all-or-none duplicate case can't arise; the earlier batch-vs-peritem concern was moot (contract already filters). Add incrementally per created dream (see B6 idempotency), so each call adds one-or-few uuids.
 
 - [ ] **Step 1: Write failing tests** with a fake `sdk` — inflight sums two calls **and never calls `get_dreams` without a `userUUID`** (guard: a bare call matches all users); template validation raises on non-Kling **or non-{5,10} duration**, and derives cost from duration; candidate filtering (processed-only); `existing_pairs` pages to exhaustion (fake returns 2 pages) and skips prompts missing source/end; `add_to_playlist` falls back to per-item on batch failure. **Step 2: Run → fail.** **Step 3: Implement.** **Step 4: Run → pass.** **Step 5: Commit** `feat: edream_sdk service layer`.
 
@@ -203,7 +206,7 @@ def load_config(env: Mapping[str, str]) -> Config:
 
 **Files:** `autogen_engine/run.py`; `tests/test_run.py`.
 
-**Interfaces:** `run(service, config, now, rng) -> RunSummary` — `whoami()` → in-flight guard (skip if `> max_inflight`) → `get_template` (fail-fast; validates Kling) → `existing_pairs` (dedup `already` + `connected`) → `candidate_images` (drop owner==self) → optional `feature_scores` → assemble `ImageSignals` → `popularity()` → `draw_pairs()` → **cost cap** using the template-derived `cost_per_video` (`0.35 + 0.07×duration`, or `COST_PER_VIDEO` override): `n = min(jobs_per_run, floor(max_spend_per_run / cost_per_video))` (0 if `cost_per_video<=0` or `max_spend_per_run<=0`) → for each of `n` pairs unless `dry_run`: `build_kling_prompt` → `service.create` (name `autogen <s8>→<e8>`) → collect; `add_to_playlist` at end. Returns `{pool, drawn, est_cost, created, skipped_inflight, dry_run}`. A `create` failure for one pair is caught/counted; template/playlist 404 or non-Kling template raises before any create.
+**Interfaces:** `run(service, config, now, rng) -> RunSummary` — `whoami()` → in-flight guard (skip if `> max_inflight`) → `get_template` (fail-fast; validates Kling) → `existing_pairs` (dedup `already` + `connected`) → `candidate_images` (drop owner==self) → optional `feature_scores` → assemble `ImageSignals` → `popularity()` → `draw_pairs(..., connected_cap, usage_cap)` → **cost cap** using the template-derived `cost_per_video` (`0.35 + 0.07×duration`, or `COST_PER_VIDEO` override): `n = min(jobs_per_run, floor(max_spend_per_run / cost_per_video))` (0 if `cost_per_video<=0` or `max_spend_per_run<=0`) → for each of `n` pairs unless `dry_run`: `build_kling_prompt` → `service.create` (name `autogen <s8>→<e8>`) → **`add_to_playlist` for that uuid immediately** (incremental — not one batch at the end — so a crash can't leave created-but-unlisted dreams a re-run would regenerate & re-bill). Returns `{pool, drawn, est_cost, created, skipped_inflight, dry_run}`. A `create` failure for one pair is caught/counted; template/playlist 404 or non-Kling template raises before any create.
 
 - [ ] **Step 1: Write failing tests** with a fake service:
   - in-flight over cap → `skipped_inflight`, no creates;
@@ -212,7 +215,7 @@ def load_config(env: Mapping[str, str]) -> Config:
   - dry-run → no create/add, but `est_cost` logged/returned;
   - cost cap bounds `n` (e.g. `max_spend=5`, `cost_per_video=2` → `n≤2`); `cost_per_video<=0` → create nothing;
   - all pairs already in playlist → `created=0`;
-  - happy path (dry_run false) → creates `n`, each added once, name `autogen <s8>→<e8>`;
+  - happy path (dry_run false) → creates `n`, **each added to the playlist immediately after its own create** (not one batch at the end), name `autogen <s8>→<e8>`;
   - non-Kling template / template 404 / playlist 404 → raises, no creates;
   - one create raises → run continues, counts successes.
 - [ ] **Step 2: Run → fail.** **Step 3: Implement.** **Step 4: Run → pass.** **Step 5: Commit** `feat: run orchestration with cost cap`.
