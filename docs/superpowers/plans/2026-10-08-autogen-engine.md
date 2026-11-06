@@ -34,17 +34,16 @@
 
 ### Task A1: Extend `edream_sdk` (python-api) with general-purpose methods
 
-**Repo:** `python-api` (branch off its default; keep existing consumers working).
-**Files:** add methods to the SDK client (e.g. `src/edream_sdk/client/*`); tests alongside the repo's existing SDK tests.
+**Repo:** `python-api`, **branch off `origin/main`** (it is ~19 commits ahead of `origin/stage` and is where `add_items_to_playlist` + the batch contract live). Keep existing consumers working. `autogen-engine` must pin a **main-based** SDK git ref.
+**Files:** extend the SDK client (`src/edream_sdk/client/*`); tests alongside the repo's existing SDK tests.
 
-**Already in the SDK (verified; reuse as-is):** `get_logged_user()` (`GET /auth/user`), `get_dream(uuid)`, `create_dream_from_prompt({name, prompt})` (returns the dream incl. `uuid`), `get_playlist_items(uuid, …)` (items include each dream's `prompt`), **`add_items_to_playlist(uuid, items)`** (`POST /v1/playlist/:uuid/items`, atomic all-or-none ≤500 — do **not** re-add or wrap it).
+**Already in the SDK on `origin/main` (verified; reuse as-is — do NOT re-add):** `get_logged_user()` (`GET /auth/user`), `get_dream(uuid)`, `create_dream_from_prompt({name, prompt})` (returns the dream incl. `uuid`), `get_playlist_items(uuid, …)` (items include each dream's `prompt`), **`add_items_to_playlist(uuid, items)`** (`POST /v1/playlist/:uuid/items`, atomic all-or-none — fresh uuids never collide, so no wrapping/fallback), **`get_feed(take, skip, search=, user_uuid=, feed_type=, only_hidden=)`** (exists — note the kwarg is **`feed_type`**, not `type`), **`get_ranked_feed(...)`** (exists).
 
 **Gaps to ADD (general-purpose, no autogen naming):**
-- `get_feed(take, skip, *, type=None, media_type=None)` → `GET /v1/feed`. **`media_type` is essential** — `type=dream` with no `mediaType` defaults to VIDEO, so without this arg the pool is videos, not images.
-- `get_ranked_feed(take, skip)` → `GET /v1/feed/ranked` (if not present).
-- `get_dreams(take, skip, *, user_uuid, status)` → `GET /v1/dream` (single `status` enum; `userUUID` param). **Require `user_uuid`** — a bare call (`userUUID` undefined) drops the user filter and returns *all users'* dreams.
+- **Extend `get_feed` with a `media_type` kwarg** → `mediaType` query param (keep the existing `feed_type`). **Essential** — `feed_type="dream"` with no `mediaType` defaults to VIDEO, so without it the pool is videos, not images.
+- `get_dreams(take, skip, *, user_uuid, status)` → `GET /v1/dream` (single `status` enum; `userUUID` param). **Require `user_uuid`** — a bare call (undefined `userUUID`) drops the user filter and returns *all users'* dreams.
 
-- [ ] **Step 1: Inventory** `edream_sdk` — confirm the "already present" list by grepping the client; only add the three gaps. Keep signatures general-purpose.
+- [ ] **Step 1: Inventory** `edream_sdk` on `origin/main` — confirm the "already present" list by grepping the client (esp. that `get_feed` uses `feed_type` and lacks `media_type`, and `add_items_to_playlist`/`get_ranked_feed` exist); only make the two changes above.
 - [ ] **Step 2: Write failing tests** (mocked HTTP) for each new method — path/verb/query, `Authorization: Api-Key` header, response parsing.
 - [ ] **Step 3: Run → fail.**
 - [ ] **Step 4: Implement** the new methods.
@@ -193,12 +192,12 @@ def load_config(env: Mapping[str, str]) -> Config:
 - `get_template(uuid) -> dict` → `sdk.get_dream`; **validate** prompt is `kling-25-i2v` **and `duration ∈ {5,10}`** (raise if not — the worker rejects other durations). Also derive `cost_per_video = 0.35 + 0.07 × duration` for the cost cap (config `COST_PER_VIDEO` is an optional override).
 - `candidate_images(max_pages) -> list[dict]` → page `get_feed(type="dream", media_type="image")`; keep `status=="processed"`; return uuid, playlist_count (len `playlistItems`), created_at, owner uuid
 - `feature_scores() -> dict[uuid,float]` → from `get_ranked_feed` + walking ranked playlists' items (only if `W_FEATURE>0`)
-- `existing_pairs(playlist_uuid) -> set[(start,end)]` → `get_playlist_items` **paged to exhaustion** (items cap at 500/page — a single page silently misses older pairs as the playlist grows, re-generating them); read `(source_dream_uuid,end_source_uuid)` from each item's prompt; **skip** items missing either
-- `candidate_images` passes **`media_type="image"`** to `get_feed` (required) and asserts returned items are `mediaType=="image"` (fail loud if not)
+- `existing_pairs(playlist_uuid) -> set[(start,end)]` → `get_playlist_items` **paged to exhaustion** — the default page is tiny (`PAGINATION.TAKE=10`, max 5000), so pass an explicit large `take` and loop until a short page; a single default call would silently miss older pairs and re-generate them. Read `(source_dream_uuid,end_source_uuid)` from each item's prompt; **skip** items missing either
+- `candidate_images` calls `get_feed(feed_type="dream", media_type="image")` (both required — `feed_type` is the existing kwarg name) and asserts returned items are `mediaType=="image"` (fail loud if not)
 - `create(name, prompt) -> uuid` → `sdk.create_dream_from_prompt`
 - `add_to_playlist(playlist_uuid, uuids)` → `sdk.add_items_to_playlist` as-is. **No per-item fallback** — we only ever add freshly-created uuids, so the all-or-none duplicate case can't arise; the earlier batch-vs-peritem concern was moot (contract already filters). Add incrementally per created dream (see B6 idempotency), so each call adds one-or-few uuids.
 
-- [ ] **Step 1: Write failing tests** with a fake `sdk` — inflight sums two calls **and never calls `get_dreams` without a `userUUID`** (guard: a bare call matches all users); template validation raises on non-Kling **or non-{5,10} duration**, and derives cost from duration; candidate filtering (processed-only); `existing_pairs` pages to exhaustion (fake returns 2 pages) and skips prompts missing source/end; `add_to_playlist` falls back to per-item on batch failure. **Step 2: Run → fail.** **Step 3: Implement.** **Step 4: Run → pass.** **Step 5: Commit** `feat: edream_sdk service layer`.
+- [ ] **Step 1: Write failing tests** with a fake `sdk` — inflight sums two calls **and never calls `get_dreams` without a `userUUID`** (guard: a bare call matches all users); template validation raises on non-Kling **or non-{5,10} duration**, and derives cost from duration; candidate filtering (processed-only); `existing_pairs` pages to exhaustion (fake returns 2 pages) and skips prompts missing source/end; `candidate_images` sends `feed_type="dream"`+`media_type="image"`. **Step 2: Run → fail.** **Step 3: Implement.** **Step 4: Run → pass.** **Step 5: Commit** `feat: edream_sdk service layer`.
 
 ---
 
@@ -238,8 +237,8 @@ def load_config(env: Mapping[str, str]) -> Config:
 
 **Files:** `README.md`.
 
-- [ ] **Step 1: Document running it** — install (`pip install -e .` + `edream_sdk` ref), config via env / `.env` (table from the spec; set `MAX_SPEND_PER_RUN`; `COST_PER_VIDEO` optional — derived from the template otherwise), run `python -m autogen_engine`. **Hand-setup checklist:** create the `autogen` account as a **creator** with **profile `nsfw=false`** (this is what enforces SFW inputs), issue its API key, create the output playlist, and pick a Kling (`kling-25-i2v`, duration 5/10) `TEMPLATE_DREAM_UUID`. **Loud note:** with `MAX_SPEND_PER_RUN` unset/0, a `DRY_RUN=false` run creates **zero** videos by design (fail-safe) and only logs it — set the cap to actually generate.
-- [ ] **Step 2: Document rollout** — (1) `DRY_RUN=true` (default): score/draw/log est cost, create nothing; (2) `DRY_RUN=false`, small `JOBS_PER_RUN` + `MAX_SPEND_PER_RUN`: generate a few, eyeball the `autogen` account + playlist; (3) raise caps as trust grows. Cloud/scheduling is a later, separate decision.
+- [ ] **Step 1: Document running it** — install (`pip install -e .` + `edream_sdk` ref), config via env / `.env` (table from the spec; set `MAX_SPEND_PER_RUN`; `COST_PER_VIDEO` optional — derived from the template otherwise), run `python -m autogen_engine`. **Hand-setup checklist:** create the `autogen` account as a **creator** with **profile `nsfw=false`** (enforces SFW inputs); **set a server-side `dailyQuotaUsd`/credit limit on the account** (the hard ceiling behind the client-side cap — do this before any `DRY_RUN=false`); issue its API key; create the output playlist; pick a Kling (`kling-25-i2v`, duration 5/10) `TEMPLATE_DREAM_UUID`. **Loud note:** with `MAX_SPEND_PER_RUN` unset/0, a `DRY_RUN=false` run creates **zero** videos by design (fail-safe) and only logs it — set the cap to actually generate.
+- [ ] **Step 2: Document rollout** — (1) `DRY_RUN=true` (default): score/draw/log est cost, create nothing; (2) `DRY_RUN=false`, small `JOBS_PER_RUN` + `MAX_SPEND_PER_RUN`: generate a few, eyeball the `autogen` account + playlist; (3) raise caps as trust grows. **Expectation to state:** with recency as the dominant v1 signal, the first batches will mostly connect *recent* images — that's expected, not a bug. Cloud/scheduling is a later, separate decision.
 - [ ] **Step 3: Commit** `docs: run-by-hand + rollout`.
 
 ---

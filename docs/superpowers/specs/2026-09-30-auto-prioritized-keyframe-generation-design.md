@@ -96,8 +96,9 @@ python -m autogen_engine   (manual; config from env/.env; DRY_RUN default true)
   9. for each of n pairs (unless DRY_RUN):
         prompt = build_kling_prompt(template_prompt, start, end)   [pure]
         POST /v1/dream (as autogen) → dreamUuid ; add it to PLAYLIST_UUID *right away*
-        (incremental, not one batch at end — so a crash can't leave created-but-unlisted
-        dreams that a re-run would regenerate & re-bill)
+        (incremental, not one batch at end — closes the between-runs crash hole; if the add
+        itself throws just after create, catch-and-log the uuid for manual reconcile — create
+        and add aren't atomic)
  10. log summary (pool / drawn / est_cost / created / skipped)
 ```
 
@@ -200,8 +201,9 @@ The created dream's `name` is deterministic, e.g. `autogen <start8>→<end8>`.
 - **Dedup = the output playlist.** `(source,end)` pairs already present are the dedup set; a drawn
   pair in it is redrawn. Delete a dream from the playlist → its pair can regenerate (manual redo).
   When reading items, **skip any whose prompt lacks both source/end uuids** (hand-added/non-i2v).
-  **Page the playlist to exhaustion** (items cap at 500/page) — a single page would silently miss
-  older pairs as the playlist grows and re-generate them.
+  **Page the playlist to exhaustion** — the default page is tiny (`PAGINATION.TAKE=10`, max 5000),
+  so pass an explicit large `take` and loop; a single default call would silently miss older pairs
+  as the playlist grows and re-generate them.
 - **In-flight guard.** No single "my dreams by status" endpoint (`/my-dreams` has no status
   filter; `GET /v1/dream` takes a `userUUID` param + single status). Count with two calls
   (`…&status=queue`, `…&status=processing`) using the uuid from `get_logged_user()`; skip the run
@@ -271,14 +273,19 @@ later decision.
    rejects mismatched start/end sizes, so expect a real render-failure rate. v1 accepts-and-logs;
    **confirm the worker rejects *before* fal submission** (no $ if so). Fix = pair within aspect
    buckets once dimensions are available (Deferred).
-8. **Backend credit backstop** (confirm) — the client-side cap guards a hand-run CLI, but one
-   fat-fingered `MAX_SPEND_PER_RUN` spends real fal dollars. Confirm the `autogen` account has a
-   sane server-side `dailyQuotaUsd`/credit limit as a second line of defense.
+8. **Backend credit backstop** — **REQUIRED setup step, not "confirm later".** The client-side
+   cap only guards a hand-run CLI; one fat-fingered `MAX_SPEND_PER_RUN` spends real fal dollars
+   with nothing behind it. Before the first `DRY_RUN=false`, set a sane server-side
+   `dailyQuotaUsd`/credit limit on the `autogen` account (columns exist on `User`) as the hard
+   ceiling. On the hand-setup checklist.
 9. **Create→render failure** — a dream that *creates* fine but later *fails rendering* is already
    in the output playlist (we add on create), so its pair won't retry. Intended (don't re-attempt
    a bad pair), but note it; its fal cost depends on where the failure occurred.
-10. **Pool ceiling** — `MAX_FEED_PAGES × 500` caps the candidate pool to the newest N images
-    (feed is `created_at DESC`); log when the cap is hit so silent truncation is visible.
+10. **Pool ceiling + shrinking universe** — `MAX_FEED_PAGES × pageSize` caps the pool to the
+    newest N images (feed is `created_at DESC`), and recency dominates scoring, so runs keep
+    drawing from the same recent window; with dedup the reachable universe shrinks each run. Log
+    both "feed-cap hit" and "pool exhausted vs dedup" so the operator sees when there's nothing new
+    to pair.
 
 ## Deferred / future
 
