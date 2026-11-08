@@ -11,7 +11,7 @@ CLI/batch infra. Design doc lives in metarepo until the repo exists.
 >   `TEMPLATE_DREAM_UUID` a **Kling** dream. The worker already maps `source_dream_uuid`/
 >   `end_source_uuid` to Kling's start/end images, so the prompt shape is unchanged. Kling runs
 >   on **fal**, priced `baseUsd 0.35 + usdPerSecond 0.07 × duration`
->   (`models.constants.ts`) → ~$0.70 at the pinned 5 s, $1.05 at 10 s. Add a **per-run cost
+>   (`backend/src/constants/models.constants.ts`) → ~$0.70 at the pinned 5 s, $1.05 at 10 s. Add a **per-run cost
 >   estimate (derived from the template's `duration`) + a hard spending cap**.
 > - **No provisioning script.** Spot creates the `autogen` account, its API key, and the output
 >   playlist **by hand per env**. Drop the backend provisioning task and `AUTOGEN_USER_UUID`;
@@ -66,7 +66,8 @@ playlist that also serves as dedup/connectivity state.
 - **Selection:** connectivity-biased weighted lottery (details are mine, per Spot).
 - **Dedup/connectivity:** the output playlist (`PLAYLIST_UUID`) — its items' prompts give the
   `(source,end)` pairs already made.
-- **Cost:** Kling is billed per video → a per-run estimate + a hard spending cap.
+- **Cost:** Kling (fal) is priced `0.35 + 0.07×duration` → a per-run estimate + a client-side
+  spending cap, behind the backend's enforced per-account daily credit quota.
 
 ## Architecture
 
@@ -99,7 +100,9 @@ python -m autogen_engine   (manual; config from env/.env; DRY_RUN default true)
         (incremental, not one batch at end — closes the between-runs crash hole; if the add
         itself throws just after create, catch-and-log the uuid for manual reconcile — create
         and add aren't atomic)
- 10. log summary (pool / drawn / est_cost / created / skipped)
+        · InsufficientCredits (daily quota hit) → expected; count & STOP the run (not a crash)
+        · stop after MAX_CONSECUTIVE_FAILURES (bad template/pool shouldn't burn the whole budget)
+ 10. log summary (pool / drawn / est_cost / created / skipped / rejected)
 ```
 
 ## Integration edges (public API only; `Authorization: Api-Key <key>` via `edream_sdk`)
@@ -211,7 +214,7 @@ The created dream's `name` is deterministic, e.g. `autogen <start8>→<end8>`.
 
 ## Cost estimate & spending cap
 
-Kling (fal) is priced `baseUsd 0.35 + usdPerSecond 0.07 × duration` (`models.constants.ts`), so
+Kling (fal) is priced `baseUsd 0.35 + usdPerSecond 0.07 × duration` (`backend/src/constants/models.constants.ts`), so
 cost is deterministic per run once the template's `duration` is known. **Derive** the per-video
 cost at startup from the template dream's `duration` (`0.35 + 0.07 × duration`) rather than
 trusting a stale constant — `COST_PER_VIDEO` is an optional override only. Each run caps
@@ -225,7 +228,7 @@ nothing. Client-side guard; the backend may also enforce its own credit limits o
 (default `true`), `JOBS_PER_RUN`, `CONNECTIVITY_K`, `CONNECTED_CAP`, `USAGE_CAP`, weights
 (`W_PLAYLIST`/`W_RECENCY`/`W_FEATURE`), `HALF_LIFE_DAYS`, `MAX_INFLIGHT`, `MAX_SPEND_PER_RUN`,
 `COST_PER_VIDEO` (optional override — otherwise derived from the template's `duration`),
-`MAX_FEED_PAGES`.
+`MAX_FEED_PAGES`, `MAX_CONSECUTIVE_FAILURES`.
 (Dropped vs v5: `AUTOGEN_USER_UUID` — use `get_logged_user()`; `W_VOTES` — v1 has no image votes;
 `STARTUP_JITTER_SECONDS`/`MAX_RPS`/`RETRY_MAX`/`SHORTLIST_SIZE` — no limiter, no per-image vote
 fetch.) The `autogen` account + its API key + the output playlist are created **by hand per env**.
@@ -270,18 +273,25 @@ later decision.
 6. **Kling cost** — real; bounded by `MAX_SPEND_PER_RUN` + `DRY_RUN`. LTX would be cheaper but only
    branches from a single start frame (no two-image connection) — see Deferred.
 7. **Aspect-ratio pairing failures** (Important) — the lottery pairs arbitrary images; the worker
-   rejects mismatched start/end sizes, so expect a real render-failure rate. v1 accepts-and-logs;
-   **confirm the worker rejects *before* fal submission** (no $ if so). Fix = pair within aspect
-   buckets once dimensions are available (Deferred).
-8. **Backend credit backstop** — **REQUIRED setup step, not "confirm later".** The client-side
-   cap only guards a hand-run CLI; one fat-fingered `MAX_SPEND_PER_RUN` spends real fal dollars
-   with nothing behind it. Before the first `DRY_RUN=false`, set a sane server-side
-   `dailyQuotaUsd`/credit limit on the `autogen` account (columns exist on `User`) as the hard
-   ceiling. On the hand-setup checklist.
-9. **Create→render failure** — a dream that *creates* fine but later *fails rendering* is already
-   in the output playlist (we add on create), so its pair won't retry. Intended (don't re-attempt
-   a bad pair), but note it; its fal cost depends on where the failure occurred.
-10. **Pool ceiling + shrinking universe** — `MAX_FEED_PAGES × pageSize` caps the pool to the
+   rejects mismatched start/end sizes **before fal submission** (`fal-handlers.ts` throws prior to
+   `provider.submit` — verified), and that throw marks the dream FAILED via
+   `handleSetDreamStatusFailed`, which **refunds the reserved credit** (`refundReservedDreamCost`).
+   So a bad pair is **$0 to fal and $0 to the account's quota** — but it still consumes a draw and
+   leaves a failed dream in the playlist (so the pair isn't retried — intended). With a mixed-aspect
+   global gallery, a large fraction of draws could be wasted creates. **v1 adds a run-level guard:
+   stop after `MAX_CONSECUTIVE_FAILURES` so a bad template/pool can't burn the whole `JOBS_PER_RUN`
+   on rejects.** Proper fix = pair within aspect buckets once dimensions are available (Deferred).
+8. **Backend credit backstop — already enforced (drift since v6).** The backend now charges
+   `providerCreditsUsd` against a per-account **`dailyQuotaUsd` (default $10/day)** at submit
+   (`provider-credit.service.ts`, `dream.util.ts`); over-quota creates throw `InsufficientCredits`
+   → the dream is rejected, no job queued. So `autogen` is **auto-capped at ~$10/day (~14 Kling
+   videos at 5 s / $0.70)** unless an admin raises its `dailyQuotaUsd`. Consequences: (a) the
+   client-side `MAX_SPEND_PER_RUN` is a convenience, not the only ceiling — good; (b) a
+   `DRY_RUN=false` run with a large cap will start **rejecting** creates once the daily quota is
+   hit, so the run loop must treat `InsufficientCredits` rejections as an **expected outcome**
+   (count them, stop the run), not a crash. Setup checklist: decide/raise `autogen`'s
+   `dailyQuotaUsd` deliberately before scaling up.
+9. **Pool ceiling + shrinking universe** — `MAX_FEED_PAGES × pageSize` caps the pool to the
     newest N images (feed is `created_at DESC`), and recency dominates scoring, so runs keep
     drawing from the same recent window; with dedup the reachable universe shrinks each run. Log
     both "feed-cap hit" and "pool exhausted vs dedup" so the operator sees when there's nothing new

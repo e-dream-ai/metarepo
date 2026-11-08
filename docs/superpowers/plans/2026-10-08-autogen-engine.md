@@ -116,6 +116,7 @@ class Config:
     half_life_days: float = 30.0
     max_inflight: int = 100
     max_feed_pages: int = 20
+    max_consecutive_failures: int = 5   # stop a run if creates keep failing (bad template/pool)
     cost_per_video: float = 0.0
     max_spend_per_run: float = 0.0
     weights: dict = field(default_factory=lambda: {
@@ -137,6 +138,7 @@ def load_config(env: Mapping[str, str]) -> Config:
         half_life_days=_num(env, "HALF_LIFE_DAYS", 30.0),
         max_inflight=_num(env, "MAX_INFLIGHT", 100),
         max_feed_pages=_num(env, "MAX_FEED_PAGES", 20),
+        max_consecutive_failures=_num(env, "MAX_CONSECUTIVE_FAILURES", 5),
         cost_per_video=_num(env, "COST_PER_VIDEO", 0.0),
         max_spend_per_run=_num(env, "MAX_SPEND_PER_RUN", 0.0),
         weights={"playlist": _num(env, "W_PLAYLIST", 2.0),
@@ -191,9 +193,9 @@ def load_config(env: Mapping[str, str]) -> Config:
 - `inflight_count(user_uuid) -> int` → two `get_dreams(user_uuid, status="queue"/"processing")` calls, summed
 - `get_template(uuid) -> dict` → `sdk.get_dream`; **validate** prompt is `kling-25-i2v` **and `duration ∈ {5,10}`** (raise if not — the worker rejects other durations). Also derive `cost_per_video = 0.35 + 0.07 × duration` for the cost cap (config `COST_PER_VIDEO` is an optional override).
 - `candidate_images(max_pages) -> list[dict]` → page `get_feed(type="dream", media_type="image")`; keep `status=="processed"`; return uuid, playlist_count (len `playlistItems`), created_at, owner uuid
-- `feature_scores() -> dict[uuid,float]` → from `get_ranked_feed` + walking ranked playlists' items (only if `W_FEATURE>0`)
+- `feature_scores() -> dict[uuid,float]` → from `get_ranked_feed` + walking ranked playlists' items (only if `W_FEATURE>0`; note `get_ranked_feed` defaults to `take=10` — page it or accept only the top-N featured playlists)
 - `existing_pairs(playlist_uuid) -> set[(start,end)]` → `get_playlist_items` **paged to exhaustion** — the default page is tiny (`PAGINATION.TAKE=10`, max 5000), so pass an explicit large `take` and loop until a short page; a single default call would silently miss older pairs and re-generate them. Read `(source_dream_uuid,end_source_uuid)` from each item's prompt; **skip** items missing either
-- `candidate_images` calls `get_feed(feed_type="dream", media_type="image")` (both required — `feed_type` is the existing kwarg name) and asserts returned items are `mediaType=="image"` (fail loud if not)
+- `candidate_images` calls `get_feed(feed_type="dream", media_type="image")` (both required — `feed_type` is the existing kwarg name), paging with `take=500` (the feed clamps to `MAX_TAKE=500`, not 5000) up to `MAX_FEED_PAGES`, and asserts returned items are `mediaType=="image"` (fail loud if not)
 - `create(name, prompt) -> uuid` → `sdk.create_dream_from_prompt`
 - `add_to_playlist(playlist_uuid, uuids)` → `sdk.add_items_to_playlist` as-is. **No per-item fallback** — we only ever add freshly-created uuids, so the all-or-none duplicate case can't arise; the earlier batch-vs-peritem concern was moot (contract already filters). Add incrementally per created dream (see B6 idempotency), so each call adds one-or-few uuids.
 
@@ -205,7 +207,7 @@ def load_config(env: Mapping[str, str]) -> Config:
 
 **Files:** `autogen_engine/run.py`; `tests/test_run.py`.
 
-**Interfaces:** `run(service, config, now, rng) -> RunSummary` — `whoami()` → in-flight guard (skip if `> max_inflight`) → `get_template` (fail-fast; validates Kling) → `existing_pairs` (dedup `already` + `connected`) → `candidate_images` (drop owner==self) → optional `feature_scores` → assemble `ImageSignals` → `popularity()` → `draw_pairs(..., connected_cap, usage_cap)` → **cost cap** using the template-derived `cost_per_video` (`0.35 + 0.07×duration`, or `COST_PER_VIDEO` override): `n = min(jobs_per_run, floor(max_spend_per_run / cost_per_video))` (0 if `cost_per_video<=0` or `max_spend_per_run<=0`) → for each of `n` pairs unless `dry_run`: `build_kling_prompt` → `service.create` (name `autogen <s8>→<e8>`) → **`add_to_playlist` for that uuid immediately** (incremental — not one batch at the end — so a crash can't leave created-but-unlisted dreams a re-run would regenerate & re-bill). Returns `{pool, drawn, est_cost, created, skipped_inflight, dry_run}`. A `create` failure for one pair is caught/counted; template/playlist 404 or non-Kling template raises before any create.
+**Interfaces:** `run(service, config, now, rng) -> RunSummary` — `whoami()` → in-flight guard (skip if `> max_inflight`) → `get_template` (fail-fast; validates Kling) → `existing_pairs` (dedup `already` + `connected`) → `candidate_images` (drop owner==self) → optional `feature_scores` → assemble `ImageSignals` → `popularity()` → `draw_pairs(..., connected_cap, usage_cap)` → **cost cap** using the template-derived `cost_per_video` (`0.35 + 0.07×duration`, or `COST_PER_VIDEO` override): `n = min(jobs_per_run, floor(max_spend_per_run / cost_per_video))` (0 if `cost_per_video<=0` or `max_spend_per_run<=0`) → for each of `n` pairs unless `dry_run`: `build_kling_prompt` → `service.create` (name `autogen <s8>→<e8>`) → **`add_to_playlist` for that uuid immediately** (incremental — not one batch at the end — so a crash can't leave created-but-unlisted dreams a re-run would regenerate & re-bill). Returns `{pool, drawn, est_cost, created, rejected, skipped_inflight, dry_run}`. A `create` failure for one pair is caught/counted; template/playlist 404 or non-Kling template raises before any create. **Stop the run early** on (a) an `InsufficientCredits` rejection — the account hit its enforced daily `dailyQuotaUsd` (~$10/day default); this is expected, count it and stop — or (b) `max_consecutive_failures` consecutive create failures (bad template/pool shouldn't burn the whole budget on rejects).
 
 - [ ] **Step 1: Write failing tests** with a fake service:
   - in-flight over cap → `skipped_inflight`, no creates;
@@ -216,7 +218,9 @@ def load_config(env: Mapping[str, str]) -> Config:
   - all pairs already in playlist → `created=0`;
   - happy path (dry_run false) → creates `n`, **each added to the playlist immediately after its own create** (not one batch at the end), name `autogen <s8>→<e8>`;
   - non-Kling template / template 404 / playlist 404 → raises, no creates;
-  - one create raises → run continues, counts successes.
+  - one create raises → run continues, counts successes;
+  - `InsufficientCredits` rejection → run stops, counted in `rejected`, not a crash;
+  - `max_consecutive_failures` consecutive failures → run stops early.
 - [ ] **Step 2: Run → fail.** **Step 3: Implement.** **Step 4: Run → pass.** **Step 5: Commit** `feat: run orchestration with cost cap`.
 
 ---
@@ -237,7 +241,7 @@ def load_config(env: Mapping[str, str]) -> Config:
 
 **Files:** `README.md`.
 
-- [ ] **Step 1: Document running it** — install (`pip install -e .` + `edream_sdk` ref), config via env / `.env` (table from the spec; set `MAX_SPEND_PER_RUN`; `COST_PER_VIDEO` optional — derived from the template otherwise), run `python -m autogen_engine`. **Hand-setup checklist:** create the `autogen` account as a **creator** with **profile `nsfw=false`** (enforces SFW inputs); **set a server-side `dailyQuotaUsd`/credit limit on the account** (the hard ceiling behind the client-side cap — do this before any `DRY_RUN=false`); issue its API key; create the output playlist; pick a Kling (`kling-25-i2v`, duration 5/10) `TEMPLATE_DREAM_UUID`. **Loud note:** with `MAX_SPEND_PER_RUN` unset/0, a `DRY_RUN=false` run creates **zero** videos by design (fail-safe) and only logs it — set the cap to actually generate.
+- [ ] **Step 1: Document running it** — install (`pip install -e .` + `edream_sdk` ref), config via env / `.env` (table from the spec; set `MAX_SPEND_PER_RUN`; `COST_PER_VIDEO` optional — derived from the template otherwise), run `python -m autogen_engine`. **Hand-setup checklist:** create the `autogen` account as a **creator** with **profile `nsfw=false`** (enforces SFW inputs); issue its API key; create the output playlist; pick a Kling (`kling-25-i2v`, duration 5/10) `TEMPLATE_DREAM_UUID`. **Credit note:** the backend already enforces a per-account daily credit cap (`dailyQuotaUsd`, **default ~$10/day** ≈ 14 videos at 5 s) — `autogen` is auto-capped unless an admin raises it; over-quota creates come back as `InsufficientCredits` (the run stops cleanly). Decide `autogen`'s `dailyQuotaUsd` deliberately before scaling up — it's the real hard ceiling; `MAX_SPEND_PER_RUN` is the softer client-side guard. **Loud note:** with `MAX_SPEND_PER_RUN` unset/0, a `DRY_RUN=false` run creates **zero** videos by design (fail-safe) and only logs it — set the cap to actually generate.
 - [ ] **Step 2: Document rollout** — (1) `DRY_RUN=true` (default): score/draw/log est cost, create nothing; (2) `DRY_RUN=false`, small `JOBS_PER_RUN` + `MAX_SPEND_PER_RUN`: generate a few, eyeball the `autogen` account + playlist; (3) raise caps as trust grows. **Expectation to state:** with recency as the dominant v1 signal, the first batches will mostly connect *recent* images — that's expected, not a bug. Cloud/scheduling is a later, separate decision.
 - [ ] **Step 3: Commit** `docs: run-by-hand + rollout`.
 
