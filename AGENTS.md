@@ -91,7 +91,6 @@ python -m unittest discover  # Run tests
 ### client (macOS)
 
 ```bash
-brew install git-lfs && git lfs install
 open client_generic/MacBuild/e-dream.xcodeproj
 ./client_generic/MacBuild/build.py
 ./client_generic/MacBuild/release.py
