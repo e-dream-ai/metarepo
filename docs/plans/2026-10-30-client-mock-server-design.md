@@ -171,16 +171,13 @@ The client limits how long a slow download can last: `ProgressiveHttpStream` set
 
 **Today** (2026-11-11) the tests serve whatever is in the alpha client's cache (`/Users/Shared/infinidream.ai/content/mp4`), choosing the smallest or largest files with at least 900 frames. That got the tests going, but the results depend on what's cached on that machine: the throttle test broke when larger videos arrived. We need to **own the test videos**: known content, known properties, and the same bytes on every machine and in every replay.
 
-A controlled video set:
-- **Is versioned and named** (`synth-v1`, `pinkfloyd-2026-11`), with a manifest giving each video's uuid, md5, size, frames, fps, resolution, codec and bitrate. Tests and chaos schedules refer to a set by name and check the md5s.
-- **Covers the properties that stress the client**, chosen on purpose instead of found:
-  - bitrate and resolution: from tiny CI clips up to 4K high-bitrate clips that load the decoder
-  - length: 1 frame, a few seconds, and long enough (≥900 frames at 20 fps) that a dream can't end by itself during a test
-  - fps: the usual rates plus odd ones
-  - keyframe spacing: short and long GOPs, which change how seeking and rebuffering behave
-  - codecs and containers the client claims to support
-- **Shows frame numbers.** Synthetic clips draw each frame's number as a small barcode (see "Reading the screen"), so the harness can tell which frame is showing.
-- **Lives in a dedicated bucket** (for example, R2 `edream-test-fixtures`), fetched by name with md5 checks into `~/edream-fixtures/`. Synthetic sets can be regenerated from their recipe instead of downloaded.
+**Everything comes from alpha (decision, 2026-11-11).** The client only ever plays alpha's encodings (the video service transcodes every upload to HEVC, `-crf 24`, at most 4K), so codecs, bitrates and keyframe spacing outside that pipeline don't need testing, and no new storage is needed. A controlled set:
+- **Is a playlist on alpha**, owned by a test account and kept out of shared and default playlists, so users don't come across it by accident. It holds two kinds of dream:
+  - **Numbered dreams** that we generate and upload: each frame shows its number in **large Arabic numerals** for people, and the same number as a **barcode strip** for the harness. Each dream also shows its name and has its own background color, so a wrong dream or a crossfade is obvious to people and to the harness. At least 900 frames each, so a dream can't end by itself during a test, plus a few short ones (1 frame, a few seconds) for edge cases. Variety in resolution and length comes from the generator.
+  - **Existing alpha dreams** chosen for the range the pipeline really produces: short and long, low resolution to 4K, small and large files, and the usual frame rates.
+- **Is pinned by a manifest committed to git:** each dream's uuid, md5, size, frames, fps and resolution, as alpha serves them.
+- **Is fetched once per machine** by `fixtures.py fetch <set>`, through the same client API the client uses (playlist, dream info, `/url`), with a test account's key. Files go to `~/edream-fixtures/<set>/`, and every md5 is checked. After that, tests and replays read only the local copy, so they don't depend on alpha being up or unchanged. If alpha re-processes or deletes a dream, the md5 check fails at fetch time and the set gets a new version.
+- **Checks the pipeline on upload.** The numbered dreams' encoded copies must have the frame count and fps we generated. If the pipeline drops frames or changes the rate, the numbers on screen won't match the heartbeat, and the fetch step reports it.
 
 A fixture set is a directory:
 
@@ -197,7 +194,7 @@ fixtures/<set>/
   - Caveat: `/url` uses up quota on the real account. Use a test account or an admin with refillable quota.
   - Caveat: auth needs whatever header the real backend accepts (`Authorization: Api-Key`, see above).
 - `fixtures.py import-cache <data-dir>` builds a set from a client's existing cache with no network at all. The client already saves raw `{success, data}` responses under `content/json/`, and the mp4s are under `content/mp4/`. The 544 MB currently cached on the dev Mac becomes the first set.
-- `fixtures.py synth` generates tiny clips (with `Tests/generate_test_videos.sh`) plus matching metadata, for fast CI runs and for edge cases like 1-frame dreams, an odd fps, or a huge `frames` value.
+- `fixtures.py numbered` generates the numbered dreams (ffmpeg: numerals with `drawtext`, barcode bits with `drawbox`, a color and name per dream) for upload to alpha with `edream_sdk`. Metadata edge cases that need no upload, like a huge `frames` value or `fps` as a number, are served as overrides by the mock server.
 
 **Where fixtures live.** The mp4s stay out of git; the default location is `~/edream-fixtures/`, overridable by env. Each `manifest.json` (uuids and md5s) is committed, so a set can be re-fetched by name. Fixtures can be **overridden** at runtime, e.g. by a scenario that serves dream X with a wrong md5, with no edits to the files.
 
@@ -272,7 +269,7 @@ The heartbeat sees what the client meant to draw. To confirm what reached the sc
 The heartbeat reports what the client thinks it drew. Reading pixels checks that independently. There are three levels, in the order to build them:
 
 1. **Screenshots about once a second** (working, Mac only). `screencapture -l` on the client's window catches a black or frozen picture. It needs Screen Recording permission for the terminal; without it the checks are skipped, and the test says so. Some dreams are legitimately dark, and crossfades can pass through dark frames, so "black" means near-zero brightness for several seconds. A paused client measured a difference of 0.00 between screenshots and a slow-moving dream about 0.5, so the threshold is 0.2.
-2. **Frame numbers in generated clips.** `fixtures.py synth` draws each frame's number as a small barcode, so the harness reads which frame is showing, not guesses from the picture. Skips, repeats, out-of-order frames and wrong dreams all become visible. These clips are tiny and need no hosting. At screenshot rate this already catches a wrong dream or a stuck clip.
+2. **Frame numbers in the numbered dreams.** Each frame shows its number in large numerals and as a barcode (see "Fixtures"). The harness reads the barcode, so it knows which frame is showing instead of guessing from the picture; people watching or looking at a saved screenshot read the numerals. Skips, repeats, out-of-order frames and wrong dreams all become visible. These clips are tiny and need no hosting. At screenshot rate this already catches a wrong dream or a stuck clip.
 3. **Readback inside the client, on test runs only.** This gives per-frame accuracy, since an outside capture tool can drop frames itself at 30-60 fps. It needs code per renderer (Metal first) and must not slow rendering, or it causes the stutters being measured.
 
 A locked screen stops rendering, so rule that out first. Hosted Mac CI can't run Metal, so these checks need the dedicated Mac mini or Linux under Xvfb.
@@ -335,7 +332,7 @@ Then `analyze.py <log>` turns a run into a stutter report: stalls longer than 10
 | 0 | (client#735) Client prerequisites: scheme override + plain `ws://`, `INFINIDREAM_DATA_DIR`, render heartbeat | A release build runs against `http://127.0.0.1` with a temp data directory |
 | 1 | Mock API, socket and media server (unshaped), starting from the basic server and end-to-end test already in `client_generic/tests/mock-server/`; fixtures via `import-cache` and `snapshot`; runner launch, ready gate, watch, crash and hang verdicts with artifacts; test-only `quit` event | A scripted "play a playlist, next ×5, quit" passes on Mac; a scripted malformed event reproduces the null-dereference crash with a crash report |
 | 2 | Shaping (per-channel profiles, shared link, schedules, stalls) and media/API/socket faults; #728 scenario | The #728 scenario runs unattended. If it reproduces, we have stacks; if not, it runs as a regression test. The duplicate-download invariant is checked. Reconnect over plain `ws://` works after a server-side drop; #735 only tested connecting. |
-| 2b | Controlled video sets: synthetic generator with frame-number barcodes, plus a named real-video set in a dedicated bucket; tests stop reading the local cache | The e2e and throttle tests pass on a machine with an empty client cache |
+| 2b | Controlled video sets on alpha: generate numbered dreams (numerals + barcode), upload them to a test account's playlist, add chosen existing dreams, `fixtures.py fetch` with md5 checks; tests stop reading the local cache | The e2e and throttle tests pass on a machine with an empty client cache, and a screenshot's barcode matches the heartbeat's frame number |
 | 2c | CPU load generator (`load.py`) with presets and schedules; frame budgets as verdicts | A run under `heavy` load produces a per-level report of late ticks and discards; an unloaded run that discards a frame fails |
 | 3 | Chaos mode: schedule file, isolated random streams, `--replay` with `--repeat`, client test seed, crash detection that sees swallowed SIGSEGVs | Runs for 30 minutes unattended; a failing run's printed replay command re-runs the same schedule and reports a hit rate |
 | 4 | Frame-level logging (Phase 3) and `analyze.py`. The heartbeat counters are done (client#748); still needed are wall-clock rebuffer durations, crossfade stalls, present backpressure, and the report | Stutter report for a throttled or loaded run |
