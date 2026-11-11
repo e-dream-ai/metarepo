@@ -7,8 +7,8 @@ Tracking issue: [client#733](https://github.com/e-dream-ai/client/issues/733). D
 Run the real client (Mac, Windows, Linux) against a local server that we fully control, so that scripts, not a person at the keyboard, can reproduce timing, network and remote-control bugs. Priorities, in order:
 
 1. **Crashes and hangs.** Detect them, and capture evidence automatically: the stack sample, the log and the request log.
-2. **Timing stress.** Control latency and bandwidth for every channel (API, socket, media), not only error injection, so we can push the client's timing and look for pauses.
-3. **Stutters and dropped frames**, read from client logs. This needs more client logging (Phase 3).
+2. **Timing stress.** Control latency and bandwidth for every channel (API, socket, media), not only error injection, and load the machine's CPU, so we can push the client's timing and look for pauses.
+3. **Stutters and dropped or late frames**, read from the client's heartbeat and judged against a frame budget, not only noted (see "Verdicts for frames").
 
 Out of scope for now: the sign-in flow (magic link, WorkOS, refresh). The harness authenticates with an API key that the server accepts unconditionally.
 
@@ -108,6 +108,30 @@ Profiles can be changed at runtime through `/control`, so a scenario can play at
 
 Named presets: `lan` (unshaped), `home` (2.5 MB/s shared, 30 ms), `slow` (500 KB/s, 150 ms), `stage-worker` (1.2 MB/s with stalls; the conditions under which #728 was seen), `flaky` (`home` plus random 2–10 s stalls).
 
+## Machine load: CPU
+
+Network speed is one way to starve the client; a busy machine is another. Users run the client beside builds, browsers and games, and a screensaver often starts while something heavy is still running in the background. CPU load challenges the decoder threads, the render thread's timing and the download threads.
+
+**The load generator** is a separate helper process, `load.py`, started and controlled by the runner (and from chaos schedules):
+
+| Knob | Meaning |
+|---|---|
+| `threads` | number of busy worker processes (processes, not Python threads, so the GIL doesn't cap them) |
+| `duty` | fraction of each 10 ms period each worker spins, 0–1 |
+| `nice` | the workers' priority; default the same as the client, since a real competing app gets no handicap |
+| `schedule` | piecewise over time, like the network schedule: e.g. `[(0s, 0), (20s, all cores at 90%), (60s, 0)]` |
+| `pattern` | `steady`, `bursts` (on/off with a random period from the `load` stream), or `ramp` |
+
+Named presets: `idle`, `moderate` (half the cores at 50%), `heavy` (all cores at 90%), `oversubscribed` (twice the core count at 100%), `bursty` (all cores, random 0.5–5 s bursts).
+
+Details that matter:
+- **Measure what was achieved.** The generator logs the load it actually produced each second (from `os.times()` or `getrusage`), and the runner logs the client's own CPU use. Both go into the event timeline beside the heartbeats, so a report can say "late ticks rose when load reached 90%".
+- **Apple Silicon has performance and efficiency cores.** The machine's P and E core counts are recorded with the run, and `heavy` is defined as the total number of cores so the client's threads can't simply escape to idle cores.
+- **Thermals.** Long heavy runs slow the CPU over time, so a 30-minute run is not the same machine at minute 1 and minute 30. The runner records `pmset -g therm` (Mac) at the start and the end.
+- **Inside the client.** `INFINIDREAM_TEST_STALL_MS` / `_EVERY_MS` already stall the render thread directly. A matching decoder-side stall (sleep in the frame-reading thread) would test the `short` and `rebuffers` counters, which outside load and throttling can't target precisely.
+
+Later, the same helper can add memory pressure (allocate and touch N GB), disk contention (heavy writes on the cache volume) and GPU load (a Metal compute or render job). CPU comes first.
+
 ## Faults (beyond timing)
 
 All faults can be targeted at one dream, at the Nth request, at Range requests only, or at a percentage of requests.
@@ -144,6 +168,19 @@ The client limits how long a slow download can last: `ProgressiveHttpStream` set
 - relaunch on a dirty data directory (leftover `.tmp` files)
 
 ## Fixtures
+
+**Today** (2026-11-11) the tests serve whatever is in the alpha client's cache (`/Users/Shared/infinidream.ai/content/mp4`), choosing the smallest or largest files with at least 900 frames. That got the tests going, but the results depend on what's cached on that machine: the throttle test broke when larger videos arrived. We need to **own the test videos**: known content, known properties, and the same bytes on every machine and in every replay.
+
+A controlled video set:
+- **Is versioned and named** (`synth-v1`, `pinkfloyd-2026-11`), with a manifest giving each video's uuid, md5, size, frames, fps, resolution, codec and bitrate. Tests and chaos schedules refer to a set by name and check the md5s.
+- **Covers the properties that stress the client**, chosen on purpose instead of found:
+  - bitrate and resolution: from tiny CI clips up to 4K high-bitrate clips that load the decoder
+  - length: 1 frame, a few seconds, and long enough (≥900 frames at 20 fps) that a dream can't end by itself during a test
+  - fps: the usual rates plus odd ones
+  - keyframe spacing: short and long GOPs, which change how seeking and rebuffering behave
+  - codecs and containers the client claims to support
+- **Shows frame numbers.** Synthetic clips draw each frame's number as a small barcode (see "Reading the screen"), so the harness can tell which frame is showing.
+- **Lives in a dedicated bucket** (for example, R2 `edream-test-fixtures`), fetched by name with md5 checks into `~/edream-fixtures/`. Synthetic sets can be regenerated from their recipe instead of downloaded.
 
 A fixture set is a directory:
 
@@ -213,6 +250,23 @@ There are three layers, because each existing signal misses something:
 
 Buffering that never ends counts as a hang too: the heartbeat says "buffering" for longer than the fault scenario allows.
 
+### Verdicts for frames
+
+Crashes and hangs aren't the only failures: we are also looking for **dropped and late frames**. The 1 Hz heartbeat already reports them (client#748): `late_ticks` (ticks longer than 1.5 display intervals), `clamped_ticks` and `lost_ms` (ticks clamped at 100 ms, and the timeline time that lost), and for each clip `discarded` (frames skipped to catch up), `short` and `rebuffers`.
+
+The harness judges them against a **frame budget**, set by the conditions in force at the time:
+
+| Conditions | Budget |
+|---|---|
+| Unshaped network, idle machine, steady playback | Zero discards, zero clamped ticks; late ticks only in the first few seconds after launch and around a command. Anything else fails. |
+| Network starved below the dream's rate | Rebuffers are expected. Fails if the render loop stalls (heartbeat gap), if a rebuffer outlasts its scenario's limit, or if discards keep growing after the network recovers. |
+| CPU load | Measured, not passed or failed at first: for each load level, record late ticks per minute, discards per minute and the longest tick. Once there's a baseline, a later build that does clearly worse fails. |
+| Around a command or crossfade | A short allowance per event, set from measurements. |
+
+Every budget failure is reported with the time, the heartbeat lines around it, and what the network and load were doing then, from the merged timeline. Known bugs that inflate the counts (#747: each resume after a rebuffer discards a frame and clamps a tick) are noted so they aren't counted twice, and the budget tightens when they're fixed.
+
+The heartbeat sees what the client meant to draw. To confirm what reached the screen, use frame-number clips and, later, readback inside the client (see "Reading the screen").
+
 ## Reading the screen
 
 The heartbeat reports what the client thinks it drew. Reading pixels checks that independently. There are three levels, in the order to build them:
@@ -226,17 +280,35 @@ A locked screen stops rendering, so rule that out first. Hosted Mac CI can't run
 ## Chaos mode
 
 ```
-chaos.py --set pinkfloyd --seed 1234 --duration 30m --profile flaky
+chaos.py --set pinkfloyd --seed 1234 --duration 30m --profile flaky --load moderate
 ```
 
-- A seeded RNG chooses from three pools:
+- A seeded RNG chooses from four pools:
   - actions: next, previous, forward, backward, play_dream(random), play_playlist, pause/unpause, speed, quit+relaunch
   - shaping changes: profile switches, schedule ramps
   - faults
-- Each action is logged with a timestamp. Hang detection and invariants run continuously.
-- On failure the harness saves the seed and the action log. `chaos.py --replay <run-id>` re-runs the exact sequence. Shrinking a failing sequence to a minimal one (delta debugging) comes later.
+  - machine load: CPU load changes (see "Machine load")
+- Hang detection, invariants and frame budgets (see "Verdicts for frames") run continuously.
 
-Expected first catches: the #728 class (a seek onto a shared download that dies), the duplicate-download registry gap, rebuffer thrash, and the malformed-event crashes.
+### Making a failure replayable
+
+A seed reproduces what the harness does, not what the client does: the client's download, decode and render threads run on real time, so the same inputs can take a different path. So the seed is necessary but not enough:
+
+1. **Generate the whole schedule up front.** Before launching the client, the seed generates a list of `(when, action, params)` covering commands, shaping changes, faults and load changes. It's written to `schedule.json` in the run folder. The seed is printed on the first line of output, and on failure the harness prints a copy-paste replay command.
+2. **Replay from the file, not the seed.** `chaos.py --replay <run>/schedule.json` runs exactly those actions, even after the generator has changed. `--seed N` alone regenerates the schedule and is only for convenience. Because the schedule is plain JSON, a person (or a shrinker) can delete actions and replay to find what matters.
+3. **Isolated random streams.** All harness randomness lives in the Python harness and mock server, which are separate processes from the client, so nothing the client does can change it. Inside the harness, nothing uses the shared `random` module's state. Each stream (`commands`, `shaping`, `media-faults`, `api-faults`, `socket-faults`, `load`, `jitter`) gets its own `random.Random` seeded from a hash of `(seed, stream name)`. Adding a new fault type then adds a stream without shifting the others, so old seeds keep producing the same commands.
+4. **The client's own randomness.** The client picks dreams with `rand()` and with `mt19937` generators seeded from `random_device` (`PlaylistManager.cpp`), and picks splash images with `rand()`. A test-only `INFINIDREAM_TEST_SEED`, honored only when `INFINIDREAM_DATA_DIR` is set, gives those choices their own seeded generator. Without it, the client behaves exactly as now. The harness derives this seed from the run seed too (stream `client`).
+5. **Pin everything else.** `schedule.json` also records the client build (commit, and Debug or Release), the harness commit, the fixture set with each video's uuid and md5, and the machine (model, OS, core counts). Replay warns on any mismatch. This is why chaos needs controlled videos (see "Fixtures"): a schedule that names videos from someone's local cache can't be replayed elsewhere, or even on the same machine once the cache changes.
+6. **Anchor timing to client events where it matters.** "800 ms after the client reports `playing` for dream D" replays closer than "12.4 s after launch", because startup time varies from run to run. The schedule supports both: `at` (seconds since launch) and `after` (an event from the server log or the heartbeat, plus an offset).
+7. **Replay many times and report the hit rate.** `--replay ... --repeat 20` gives "crashed 4 of 20". For a race, that's the useful result, both to confirm a bug and later to confirm the fix.
+8. **Capture everything on the first hit.** The failure may never reproduce, so every failed run keeps the client log, the server's `events.jsonl`, the crash report or stack sample, the schedule, the client's exit status and the load measurements.
+9. **Shrink later.** Delta debugging: remove halves, then smaller chunks, of a failing schedule, replaying each candidate several times, until the smallest schedule that still fails is left. At about a minute per run this is an overnight job, so it comes after the basic replay works.
+
+### Crash detection prerequisite
+
+On master, the Mac client catches **SIGSEGV** in `ESScreensaverView.mm` and calls `exit(0)`. A segfault then leaves no crash report and looks like a clean exit (client#769). Until the client stops catching SIGSEGV, the harness also treats `RECEIVED SIGSEGV` in the log as a crash. A test-run exit by any signal other than the SIGTERM the harness sent is a crash too.
+
+Expected first catches: the #728 class (a seek onto a shared download that dies), the duplicate-download registry gap, rebuffer thrash, the malformed-event crashes, and frame drops under CPU load.
 
 ## Phase 3: making every dropped or delayed frame visible
 
@@ -263,8 +335,11 @@ Then `analyze.py <log>` turns a run into a stutter report: stalls longer than 10
 | 0 | (client#735) Client prerequisites: scheme override + plain `ws://`, `INFINIDREAM_DATA_DIR`, render heartbeat | A release build runs against `http://127.0.0.1` with a temp data directory |
 | 1 | Mock API, socket and media server (unshaped), starting from the basic server and end-to-end test already in `client_generic/tests/mock-server/`; fixtures via `import-cache` and `snapshot`; runner launch, ready gate, watch, crash and hang verdicts with artifacts; test-only `quit` event | A scripted "play a playlist, next ×5, quit" passes on Mac; a scripted malformed event reproduces the null-dereference crash with a crash report |
 | 2 | Shaping (per-channel profiles, shared link, schedules, stalls) and media/API/socket faults; #728 scenario | The #728 scenario runs unattended. If it reproduces, we have stacks; if not, it runs as a regression test. The duplicate-download invariant is checked. Reconnect over plain `ws://` works after a server-side drop; #735 only tested connecting. |
-| 3 | Chaos mode with seeds and replay | Runs for 30 minutes unattended and produces artifacts on failure |
-| 4 | Frame-level logging (Phase 3) and `analyze.py` | Stutter report for a throttled run |
+| 2b | Controlled video sets: synthetic generator with frame-number barcodes, plus a named real-video set in a dedicated bucket; tests stop reading the local cache | The e2e and throttle tests pass on a machine with an empty client cache |
+| 2c | CPU load generator (`load.py`) with presets and schedules; frame budgets as verdicts | A run under `heavy` load produces a per-level report of late ticks and discards; an unloaded run that discards a frame fails |
+| 3 | Chaos mode: schedule file, isolated random streams, `--replay` with `--repeat`, client test seed, crash detection that sees swallowed SIGSEGVs | Runs for 30 minutes unattended; a failing run's printed replay command re-runs the same schedule and reports a hit rate |
+| 4 | Frame-level logging (Phase 3) and `analyze.py`. The heartbeat counters are done (client#748); still needed are wall-clock rebuffer durations, crossfade stalls, present backpressure, and the report | Stutter report for a throttled or loaded run |
+| 4b | Shrinking failing chaos schedules | A failing 30-minute schedule shrinks overnight to a few actions |
 | 5 | Windows and Linux runner support; Linux headless CI (Xvfb + lavapipe) | The same scenarios pass on all three |
 
 ## Open questions
