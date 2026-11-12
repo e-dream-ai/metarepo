@@ -12,6 +12,34 @@ Run the real client (Mac, Windows, Linux) against a local server that we fully c
 
 Out of scope for now: the sign-in flow (magic link, WorkOS, refresh). The harness authenticates with an API key that the server accepts unconditionally.
 
+## Status (2026-11-11)
+
+All of this is on client master, in `client_generic/tests/mock-server/`, Mac only. Nothing has been compiled or run on Windows or Linux yet.
+
+**Tests.** Every test launches the real client against the mock server in its own data folder, quits it with the test-only `quit`, and checks for crashes (including ones swallowed by the SIGSEGV handler), hangs, partial downloads, leaked credentials and changes to real installs.
+
+| Test | What it does |
+|---|---|
+| `e2e_test.py` | plays, `next`, `pause`, screenshots for a black or frozen picture |
+| `commands_test.py` | `next` ×5 over a slow link (checks the play history, #771), `previous`, `play_dream` with and without a frame, `forward`, `backward` |
+| `crash_test.py` | malformed remote-control messages, one fresh client each |
+| `throttle_test.py` | starves and recovers the link; checks rebuffering and the render loop. Models playback as 20 fps ÷ the dream's activity level |
+| `chaos_test.py` | ~200 random commands a minute while the media rate changes every 2–6 s, throttled from launch, top rate 20 MB/s; `--cache-gb` forces eviction; reports streamed plays, cut-short transfers and evictions, and fails a run that barely touched the network; `--seed` replays the commands |
+| `navigation_chaos_test.py` | the same limited to `next`, `previous`, `forward`, `backward`, `play_playlist`, `play_dream`, rate changing every 1–4 s |
+| `keyframe_test.py` | checks every move on a keyframed playlist against its keyframe graph: chains with `next`, natural ends, a dead end, a cycle; keyframe moves must be seamless and others not |
+| `repro_test.py` | one case per bug found, kept as regression tests (#775, #776) |
+
+Every test takes `--set` (a fixture set) and `--playlist ID` (serve one real playlist of a snapshot set and start the client on it). The mock server serves a snapshot set's recorded dream records and real playlists, with keyframes, next to four made-up playlists (all, reversed, single dream, all but the first).
+
+**Fixture sets** (see "Fixtures"): `local-v1` (6 videos from a local cache), `alpha-v1` (62 dreams, 2.8 GB, from three alpha playlists) and `wanderlust-v1` (88 dreams, 3.2 GB, chosen by a real client from the keyframed Wanderlust playlist: long chains, 3 dead ends, 3 small cycles).
+
+**Bugs found and fixed** with it: #771 (`next` stuck on a short playlist), two dangling pointers found by an AddressSanitizer build (`GetClientProxy`, `DumpError`), #775 (`play_dream` past the end froze the picture), #776 (`previous` wrong after the playlist wraps), plus the malformed-message crashes (#772). A run of all seven tests on all four snapshot playlists found no crashes.
+
+**Open findings:**
+- On a limited link, prefetching later, much bigger dreams takes the bandwidth the dream on screen needs; on Wanderlust the first dream rebuffers at 2.5× its rate (`throttle_test.py --playlist` Wanderlust fails). Not filed.
+- A dream that ends by itself only moves to a cached dream (by design, #269), so on a slow link keyframe chains break when the successor hasn't downloaded; the downloader doesn't put the playing dream's successor first.
+- The client's download path sends a bare `Api-Key:` header, which alpha's client API answered with 401 when tried by hand; it may only work because the client normally has a session cookie.
+
 ## Architecture
 
 ```
@@ -169,7 +197,15 @@ The client limits how long a slow download can last: `ProgressiveHttpStream` set
 
 ## Fixtures
 
-**Today** (2026-11-11) the tests serve whatever is in the alpha client's cache (`/Users/Shared/infinidream.ai/content/mp4`), choosing the smallest or largest files with at least 900 frames. That got the tests going, but the results depend on what's cached on that machine: the throttle test broke when larger videos arrived. We need to **own the test videos**: known content, known properties, and the same bytes on every machine and in every replay.
+**Started from the local cache.** At first the tests served whatever was in the alpha client's cache (`/Users/Shared/infinidream.ai/content/mp4`), choosing the smallest or largest files with at least 900 frames. That got the tests going, but the results depended on what was cached on that machine: the throttle test broke when larger videos arrived. We need to **own the test videos**: known content, known properties, and the same bytes on every machine and in every replay.
+
+**Now (2026-11-11): snapshot sets from alpha.** `fixtures.py snapshot` is built and used:
+- It reads the API key from `INFINIDREAM_FIXTURES_KEY` or an env file (python-api's `.env` works) and sends it, as `Authorization: Api-Key <key>`, only to the API host, never to the video URLs `/url` returns.
+- `--playlist <id>[:N]` takes a playlist's first N dreams. It saves the raw `/playlist` and `/dream` responses under `api/`, downloads each video through `/url` one at a time, checks md5s, and can be rerun to resume.
+- `--from-cache DIR --only-cached` builds a set from what a real client chose to download from a playlist, copying files whose md5 matches instead of downloading. That's how the keyframed Wanderlust set was made: the client ran on the playlist until about 3 GB were cached.
+- `/url` subtracts each dream's size from the account's quota, but alpha doesn't enforce it: a 2.8 GB fetch went through on a 1 GB quota, leaving it at 0.
+- Sets made so far: `alpha-v1` (Infinite Visions first 20, medium, 727 frames at activity 2.5; Pink Floyd first 2, 605–787 MB, 11–12k frames; Wankel Rotary Engine first 40, 4–9 MB, 193 frames) and `wanderlust-v1` (88 dreams, 900 frames). They live in `~/edream-fixtures/`; their manifests aren't committed yet, and the numbered dreams below aren't made yet.
+- The layout is flat (`<uuid>.mp4` + `manifest.json` + `api/`), not the `media/` folder sketched below.
 
 **Everything comes from alpha (decision, 2026-11-11).** The client only ever plays alpha's encodings (the video service transcodes every upload to HEVC at 1080p), so other codecs, resolutions, bitrates and keyframe spacing don't need testing, and no new storage is needed. A controlled set:
 - **Is a playlist on alpha**, owned by a test account and kept out of shared and default playlists, so users don't come across it by accident. It holds two kinds of dream:
@@ -276,6 +312,8 @@ A locked screen stops rendering, so rule that out first. Hosted Mac CI can't run
 
 ## Chaos mode
 
+**Built so far** (`chaos_test.py`, `navigation_chaos_test.py`): a seeded RNG picks commands and gaps (mostly short, some bursts of 3–6 commands 50 ms apart, some calm stretches), and media rates from 10 KB/s to 20 MB/s; the run starts at a random limited rate. `--seed` regenerates the same commands, and every action goes to `actions.jsonl`. Afterwards it lifts the limit, unpauses, returns to the default playlist and checks that playback and `next` work. Run on an AddressSanitizer Debug build (`xcodebuild ... -enableAddressSanitizer YES`) it found two memory bugs within a minute; after the fixes, 10 runs of 60 s and 5 navigation runs passed. Not built yet: `schedule.json` replay, isolated random streams, faults and CPU load, the client test seed, `--repeat`.
+
 ```
 chaos.py --set pinkfloyd --seed 1234 --duration 30m --profile flaky --load moderate
 ```
@@ -306,6 +344,20 @@ A seed reproduces what the harness does, not what the client does: the client's 
 On master, the Mac client catches **SIGSEGV** in `ESScreensaverView.mm` and calls `exit(0)`. A segfault then leaves no crash report and looks like a clean exit (client#769). Until the client stops catching SIGSEGV, the harness also treats `RECEIVED SIGSEGV` in the log as a crash. A test-run exit by any signal other than the SIGTERM the harness sent is a crash too.
 
 Expected first catches: the #728 class (a seek onto a shared download that dies), the duplicate-download registry gap, rebuffer thrash, the malformed-event crashes, and frame drops under CPU load.
+
+## Long-running resource test (future)
+
+Short runs can't see a slow leak. A soak test runs the client for hours (8–24) and checks that it doesn't grow:
+
+- **What it does:** cycles playlists, including the big snapshot sets with a cache limit smaller than the set, so it keeps evicting and downloading again; mixes natural play with bursts of chaos commands and changing bandwidth; and repeats quit and relaunch every so often.
+- **What it samples**, every minute, into the run folder:
+  - memory: resident size and physical footprint (Mac `footprint` / `ps`, Linux `/proc/<pid>/status`, Windows working set and private bytes)
+  - threads and open handles: thread count, open file descriptors (`lsof -p`, `/proc/<pid>/fd`), Windows handle count
+  - GPU memory where the OS reports it
+  - disk: the cache stays within its limit, `.tmp` files don't pile up, and the log folder doesn't grow without bound
+  - the heartbeat's own counters, to tie growth to what the client was doing
+- **Verdict:** after a warm-up hour, each series' trend must stay under a set slope (for example, memory growing less than a few MB an hour once the cache is full); anything that only ever goes up fails. It reports the series as a chart, with the commands and rate changes alongside.
+- **Leak tools on the side:** a run under Mac `leaks` with `MallocStackLogging`, or an ASan/LeakSanitizer build on Linux, names the allocations that were never freed.
 
 ## Phase 3: making every dropped or delayed frame visible
 
@@ -338,6 +390,15 @@ Then `analyze.py <log>` turns a run into a stutter report: stalls longer than 10
 | 4 | Frame-level logging (Phase 3) and `analyze.py`. The heartbeat counters are done (client#748); still needed are wall-clock rebuffer durations, crossfade stalls, present backpressure, and the report | Stutter report for a throttled or loaded run |
 | 4b | Shrinking failing chaos schedules | A failing 30-minute schedule shrinks overnight to a few actions |
 | 5 | Windows and Linux runner support; Linux headless CI (Xvfb + lavapipe) | The same scenarios pass on all three |
+| 6 | Long-running resource test (see that section) | An 8-hour run on Mac reports memory, threads, handles and disk as flat after warm-up, or fails naming the series that grew |
+
+**Progress (2026-11-11):**
+- **0:** done (#735).
+- **1:** done on Mac (#741, #772): mock API, socket and media server, fixtures, launch and ready gate, crash and hang verdicts, test-only `quit`. Not compiled on Windows or Linux.
+- **2:** started. A total media rate limit, changeable during a run, is the only shaping; no per-channel profiles, latency, stalls or faults yet.
+- **2b:** started. Snapshot sets from alpha (`alpha-v1`, `wanderlust-v1`) and `--playlist`; the numbered dreams, barcode reading and committed manifests are still to do.
+- **3:** started. `chaos_test.py` and `navigation_chaos_test.py` with seeds and action logs, and AddressSanitizer runs; no schedule replay, faults, load or client seed yet.
+- **4, 4b, 5, 6:** not started.
 
 ## Open questions
 
